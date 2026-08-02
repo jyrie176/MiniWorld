@@ -1,0 +1,12 @@
+torch
+torchvision
+numpy
+einops
+decord
+flash-attn
+pandas
+pyarrow
+Pillow
+wandb
+# Required by wandb.Video for mp4 encoding.
+moviepy

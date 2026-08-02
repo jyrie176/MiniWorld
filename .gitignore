@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Model weights and VAE downloads
+/checkpoints/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# Training and inference artifacts
+/outputs/
+/samples/
+/throughput/
+wandb/
+*.log
+
+# Local datasets and caches
+/data/
+/datasets/
+filter_cache/
+
+# Project page: lives in the Zhao-Yian/zhao-yian.github.io repository,
+# served at https://zhao-yian.github.io/MiniWorld/
+/docs/
+
+# Editor and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
