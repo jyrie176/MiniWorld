@@ -5,10 +5,10 @@
 ### Democratizing the Training of Video World Models from Scratch
 
 <a href="https://zhao-yian.github.io/MiniWorld/"><img src="https://img.shields.io/badge/Project-Page-1f6feb?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
-<img src="https://img.shields.io/badge/arXiv-Coming%20Soon-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv">
+<a href="https://arxiv.org/abs/2608.01127"><img src="https://img.shields.io/badge/arXiv-2608.01127-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv"></a>
 <a href="https://huggingface.co/zhaoyian01/MiniWorld"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-ffcc4d?style=for-the-badge" alt="Hugging Face"></a>
 
-[安装](#安装) · [推理](#流式推理) · [训练](#训练) · [English](README.md)
+[安装](#安装) · [推理](#流式推理) · [训练](#训练) · [引用](#引用) · [English](README.md)
 
 </div>
 
@@ -414,4 +414,19 @@ MiniWorld/
 ├── assets/                   # README 配图与效果示例
 ├── requirements.txt
 └── README.md
+```
+
+## 引用
+
+论文已发布在 arXiv：[arXiv:2608.01127](https://arxiv.org/abs/2608.01127)。
+
+如果 MiniWorld 对你的研究有帮助，欢迎引用：
+
+```bibtex
+@article{zhao2026miniworld,
+  title   = {MiniWorld: Democratizing the Training of Video World Models from Scratch},
+  author  = {Zhao, Yian and Zheng, Ruochong and Guo, Hongcan and Yan, Yu and Zhang, Jian and Chen, Jie},
+  journal = {arXiv preprint arXiv:2608.01127},
+  year    = {2026}
+}
 ```

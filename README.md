@@ -7,10 +7,10 @@
 **A minimal, reproducible recipe for action- and pose-conditioned streaming video world models**
 
 <a href="https://zhao-yian.github.io/MiniWorld/"><img src="https://img.shields.io/badge/Project-Page-1f6feb?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
-<img src="https://img.shields.io/badge/arXiv-Coming%20Soon-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv">
+<a href="https://arxiv.org/abs/2608.01127"><img src="https://img.shields.io/badge/arXiv-2608.01127-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv"></a>
 <a href="https://huggingface.co/zhaoyian01/MiniWorld"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-ffcc4d?style=for-the-badge" alt="Hugging Face"></a>
 
-[Installation](#installation) · [Inference](#streaming-inference) · [Training](#training) · [中文](README_zh.md)
+[Installation](#installation) · [Inference](#streaming-inference) · [Training](#training) · [Citation](#citation) · [中文](README_zh.md)
 
 </div>
 
@@ -447,5 +447,20 @@ MiniWorld/
 ├── assets/                   # README figures and qualitative examples
 ├── requirements.txt
 └── README.md
+```
+
+## Citation
+
+The paper is available on arXiv: [arXiv:2608.01127](https://arxiv.org/abs/2608.01127).
+
+If you find MiniWorld useful in your research, please cite:
+
+```bibtex
+@article{zhao2026miniworld,
+  title   = {MiniWorld: Democratizing the Training of Video World Models from Scratch},
+  author  = {Zhao, Yian and Zheng, Ruochong and Guo, Hongcan and Yan, Yu and Zhang, Jian and Chen, Jie},
+  journal = {arXiv preprint arXiv:2608.01127},
+  year    = {2026}
+}
 ```
 
