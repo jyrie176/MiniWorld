@@ -1,7 +1,8 @@
 import pytest
+import torch
 
 from miniworld.train import build_grad_scaler, build_parser, validate_training_args
-from miniworld.sample import build_parser as build_sample_parser
+from miniworld.sample import apply_action_variant, build_parser as build_sample_parser
 
 
 def _required_train_args():
@@ -82,6 +83,32 @@ def test_sampling_parser_accepts_supported_precision(precision):
         _required_sample_args() + ["--precision", precision]
     )
     assert args.precision == precision
+
+
+def test_sampling_parser_accepts_reproducible_action_controls():
+    args = build_sample_parser().parse_args(
+        _required_sample_args() + ["--seed", "123", "--action_variant", "shuffle"]
+    )
+
+    assert args.seed == 123
+    assert args.action_variant == "shuffle"
+
+
+def test_zero_action_variant_removes_action_conditioning():
+    actions = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+
+    transformed = apply_action_variant(actions, "zero")
+
+    torch.testing.assert_close(transformed, torch.zeros_like(actions))
+
+
+def test_shuffle_action_variant_reverses_time_without_mutating_input():
+    actions = torch.tensor([[[1.0], [2.0], [3.0]]])
+
+    transformed = apply_action_variant(actions, "shuffle")
+
+    torch.testing.assert_close(transformed, torch.tensor([[[3.0], [2.0], [1.0]]]))
+    torch.testing.assert_close(actions, torch.tensor([[[1.0], [2.0], [3.0]]]))
 
 
 @pytest.mark.parametrize("backend", ["auto", "sdpa", "flash"])

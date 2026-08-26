@@ -33,6 +33,17 @@ SAMPLE_HISTORY_LEN = 1
 WM_MODEL_CHOICES = ("B", "L", "0.5B", "1B", "3B")
 
 
+def apply_action_variant(actions: torch.Tensor, variant: str) -> torch.Tensor:
+    """Apply a deterministic action ablation for controlled comparisons."""
+    if variant == "real":
+        return actions
+    if variant == "zero":
+        return torch.zeros_like(actions)
+    if variant == "shuffle":
+        return actions.flip(dims=(1,))
+    raise ValueError(f"unknown action variant: {variant}")
+
+
 def write_video(path: str, frames: torch.Tensor, fps: int) -> None:
     """Write ``(T,H,W,C)`` uint8 video through a local temp file."""
     target = Path(path)
@@ -262,6 +273,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resize_w", type=int, default=320)
     parser.add_argument("--action_camera_views", default="exterior_image_1_left")
     parser.add_argument("--action_keys", default="cartesian_position,gripper_position")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--action_variant",
+        choices=["real", "zero", "shuffle"],
+        default="real",
+        help="Deterministic DROID action ablation for controlled comparisons.",
+    )
     parser.add_argument("--pose_enc_freq", type=int, default=15)
     parser.add_argument("--init_image", default=None)
     parser.add_argument("--init_pose", default=None)
@@ -342,6 +360,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Run streaming sampling."""
     args = parse_args()
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cuda_available = torch.cuda.is_available()
     capability = torch.cuda.get_device_capability(device) if cuda_available else None
@@ -400,6 +421,7 @@ def main() -> None:
             poses = poses.to(device)
         if actions is not None:
             actions = actions.to(device)
+            actions = apply_action_variant(actions, args.action_variant)
 
         with torch.no_grad(), torch.autocast(
             device_type="cuda", dtype=dtype, enabled=autocast_enabled
@@ -423,6 +445,9 @@ def main() -> None:
                 w_lat=w_lat,
             )
             stream_decoder = StreamingVAEDecoder(vae)
+            torch.manual_seed(args.seed + idx)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(args.seed + idx)
             start = time.perf_counter()
             result = denoiser.generate_eval_latents_streaming(
                 latents,
