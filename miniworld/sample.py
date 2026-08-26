@@ -16,6 +16,11 @@ import torchvision
 from einops import rearrange
 from torch.utils.data import DataLoader
 
+from miniworld.compatibility import (
+    flash_attention_available,
+    resolve_attention_backend,
+    resolve_sample_precision,
+)
 from miniworld.conditioning.actions import ConditioningConfig, build_cond_seq_for_batch
 from miniworld.conditioning.trajectories import SUPPORTED_TRAJECTORIES, build_custom_trajectory, load_init_image
 from miniworld.data.droid import LeRobotActionDataset
@@ -107,7 +112,7 @@ def build_denoiser(args: argparse.Namespace):
 
 def read_checkpoint(path: str) -> Tuple[Dict[str, torch.Tensor], Dict[str, object]]:
     """Read EMA weights and metadata without touching the model."""
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     weights = ckpt.get("ema_model", ckpt.get("model"))
     if weights is None:
         raise ValueError(f"Checkpoint has neither ema_model nor model: {path}")
@@ -235,8 +240,8 @@ def iter_custom_re10k_batches(args: argparse.Namespace, device: torch.device) ->
         yield {"videos": videos, "poses": poses, "actions": None}
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse public MiniWorld sampling arguments."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the public MiniWorld sampling argument parser."""
     parser = argparse.ArgumentParser("Sample MiniWorld")
     parser.add_argument("--dataset", choices=["droid", "re10k"], required=True)
     parser.add_argument("--data_root", default=None)
@@ -316,15 +321,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_fps", type=int, default=8)
     parser.add_argument("--benchmark_stream_timing", action="store_true")
     parser.add_argument("--benchmark_no_save", action="store_true")
-    args = parser.parse_args()
-    return args
+    parser.add_argument(
+        "--precision",
+        choices=["auto", "fp16", "bf16", "fp32"],
+        default="auto",
+    )
+    parser.add_argument(
+        "--attention_backend",
+        choices=["auto", "sdpa", "flash"],
+        default="auto",
+    )
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse public MiniWorld sampling arguments."""
+    return build_parser().parse_args()
 
 
 def main() -> None:
     """Run streaming sampling."""
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    cuda_available = torch.cuda.is_available()
+    capability = torch.cuda.get_device_capability(device) if cuda_available else None
+    dtype, autocast_enabled = resolve_sample_precision(
+        args.precision,
+        cuda_available=cuda_available,
+        capability=capability,
+    )
+    requested_attention_backend = args.attention_backend
+    args.attention_backend = resolve_attention_backend(
+        requested_attention_backend,
+        cuda_available=cuda_available,
+        capability=capability,
+        flash_available=flash_attention_available(),
+    )
+    print0(
+        f"[Runtime] precision={args.precision}->{dtype} "
+        f"attention={requested_attention_backend}->{args.attention_backend} "
+        f"capability={capability}"
+    )
 
     use_custom_re10k = args.custom_camera_trajectory is not None
     if use_custom_re10k:
@@ -364,7 +401,9 @@ def main() -> None:
         if actions is not None:
             actions = actions.to(device)
 
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=torch.cuda.is_available()):
+        with torch.no_grad(), torch.autocast(
+            device_type="cuda", dtype=dtype, enabled=autocast_enabled
+        ):
             latents = vae_encode(vae, rearrange(videos, "b t h w c -> b c t h w").contiguous())
             _, c_latent, t_latent, h_lat, w_lat = latents.shape
             sample_history_len = args.history_len
@@ -419,4 +458,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

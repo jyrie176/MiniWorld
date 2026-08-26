@@ -1,6 +1,7 @@
 import pytest
 
 from miniworld.train import build_grad_scaler, build_parser, validate_training_args
+from miniworld.sample import build_parser as build_sample_parser
 
 
 def _required_train_args():
@@ -62,3 +63,30 @@ def test_grad_scaler_is_enabled_only_for_cuda_fp16(
     build_grad_scaler(precision, cuda_available=True)
 
     assert captured == {"device": "cuda", "enabled": expected_enabled}
+
+
+def _required_sample_args():
+    return [
+        "--dataset",
+        "droid",
+        "--checkpoint",
+        "/model.pt",
+        "--vae_checkpoint",
+        "/vae.pt",
+    ]
+
+
+@pytest.mark.parametrize("precision", ["auto", "fp16", "bf16", "fp32"])
+def test_sampling_parser_accepts_supported_precision(precision):
+    args = build_sample_parser().parse_args(
+        _required_sample_args() + ["--precision", precision]
+    )
+    assert args.precision == precision
+
+
+@pytest.mark.parametrize("backend", ["auto", "sdpa", "flash"])
+def test_sampling_parser_accepts_attention_backend(backend):
+    args = build_sample_parser().parse_args(
+        _required_sample_args() + ["--attention_backend", backend]
+    )
+    assert args.attention_backend == backend
