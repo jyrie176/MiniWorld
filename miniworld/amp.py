@@ -60,9 +60,10 @@ def backward_and_step(
     finite = bool(torch.isfinite(grad_norm_tensor).all().item())
 
     if scaler is None:
-        optimizer.step()
+        if finite:
+            optimizer.step()
         scale_after = 1.0
-        skipped = False
+        skipped = not finite
     else:
         scaler.step(optimizer)
         scaler.update()

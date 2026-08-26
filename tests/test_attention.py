@@ -1,5 +1,7 @@
 import torch
+import torch.nn as nn
 
+from miniworld.denoiser import Denoiser, DenoiserConfig
 from miniworld.miniworld import (
     Attention,
     MiniWorldModel,
@@ -178,3 +180,24 @@ def test_cached_attention_responds_to_past_values():
     )
 
     assert not torch.allclose(original, changed)
+
+
+def test_denoiser_propagates_resolved_attention_backend(monkeypatch):
+    captured = {}
+
+    class DummyModel(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            captured.update(kwargs)
+
+    monkeypatch.setitem(
+        __import__("miniworld.miniworld", fromlist=["MiniWorldModels"]).MiniWorldModels,
+        "test",
+        DummyModel,
+    )
+    denoiser = Denoiser(
+        DenoiserConfig(wm_model="test", attention_backend="sdpa")
+    )
+
+    assert isinstance(denoiser.net, DummyModel)
+    assert captured["attention_backend"] == "sdpa"

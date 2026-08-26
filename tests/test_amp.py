@@ -136,3 +136,26 @@ def test_nonfinite_loss_does_not_backward_or_step():
     assert result.skipped is True
     assert result.finite is False
     assert result.loss_scale == 1024.0
+
+
+def test_unscaled_nonfinite_gradient_does_not_step(monkeypatch):
+    calls = []
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = _FakeOptimizer(calls)
+    monkeypatch.setattr(
+        torch.nn.utils,
+        "clip_grad_norm_",
+        lambda parameters, max_norm: torch.tensor(float("inf")),
+    )
+
+    result = backward_and_step(
+        parameter.square().sum(),
+        optimizer,
+        [parameter],
+        scaler=None,
+        max_grad_norm=1.0,
+    )
+
+    assert "optimizer.step" not in calls
+    assert result.skipped is True
+    assert result.finite is False

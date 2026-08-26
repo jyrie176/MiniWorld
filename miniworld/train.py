@@ -16,6 +16,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from miniworld.amp import backward_and_step
+from miniworld.compatibility import (
+    flash_attention_available,
+    resolve_attention_backend,
+    resolve_training_dtype,
+)
 from miniworld.conditioning.actions import ConditioningConfig, build_cond_seq_for_batch
 from miniworld.data.droid import LeRobotActionDataset
 from miniworld.data.re10k import RealEstate10KDataset
@@ -133,9 +139,10 @@ def load_pretrained(
     model: torch.nn.Module,
     ema_model: torch.nn.Module,
     optimizer: Optional[torch.optim.Optimizer] = None,
+    scaler=None,
 ) -> tuple[int, int]:
     """Load a MiniWorld checkpoint, allowing shape changes between curriculum stages."""
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     model_state = model.state_dict()
     raw_model = ckpt.get("model", ckpt.get("ema_model", {}))
     filtered = {k: v for k, v in raw_model.items() if k in model_state and model_state[k].shape == v.shape}
@@ -151,6 +158,8 @@ def load_pretrained(
             optimizer.load_state_dict(ckpt["optimizer"])
         except ValueError:
             print0("[Checkpoint] skipped optimizer state because parameter groups changed")
+    if scaler is not None and "scaler" in ckpt:
+        scaler.load_state_dict(ckpt["scaler"])
     return int(ckpt.get("epoch", 0)), int(ckpt.get("global_step", 0))
 
 
@@ -160,6 +169,7 @@ def save_checkpoint(
     model: torch.nn.Module,
     ema_model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scaler=None,
     epoch: int,
     global_step: int,
 ) -> None:
@@ -186,8 +196,13 @@ def save_checkpoint(
             "timestep_baseshift": float(args.timestep_baseshift),
             # Resolved shift, i.e. baseshift already scaled by the token count.
             "timestep_shift": float(getattr(model, "timestep_shift", -1.0)),
+            "mixed_precision": args.mixed_precision,
+            "attention_backend": args.attention_backend,
+            "max_grad_norm": float(args.max_grad_norm),
         },
     }
+    if scaler is not None:
+        payload["scaler"] = scaler.state_dict()
     epoch_path = output_dir / f"epoch_{epoch:04d}_step_{global_step:08d}.pt"
     torch.save(payload, epoch_path)
     torch.save(payload, output_dir / "last.pt")
@@ -282,7 +297,7 @@ def log_train_videos(
     autocast = torch.autocast(
         device_type="cuda",
         dtype=dtype,
-        enabled=args.mixed_precision == "bf16" and torch.cuda.is_available(),
+        enabled=args.mixed_precision in ("fp16", "bf16") and torch.cuda.is_available(),
     )
     with torch.no_grad(), autocast:
         recon = side_by_side_uint8(video_for_vae[0], vae_decode(vae, x_pred[:1].float())[0])
@@ -323,8 +338,16 @@ def build_optimizer(args: argparse.Namespace, model: torch.nn.Module) -> torch.o
     return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse public MiniWorld training arguments."""
+def build_grad_scaler(mixed_precision: str, *, cuda_available: bool):
+    """Create a dynamic scaler enabled only for CUDA FP16 training."""
+    return torch.amp.GradScaler(
+        "cuda",
+        enabled=mixed_precision == "fp16" and cuda_available,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the public MiniWorld training argument parser."""
     parser = argparse.ArgumentParser("Train MiniWorld")
     parser.add_argument("--dataset", choices=["droid", "re10k"], required=True)
     parser.add_argument("--data_root", required=True)
@@ -380,8 +403,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--ema_decay", type=float, default=0.9999)
-    parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--mixed_precision", choices=["no", "bf16"], default="bf16")
+    parser.add_argument("--max_grad_norm", "--grad_clip", dest="max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--mixed_precision", choices=["no", "fp16", "bf16"], default="bf16")
+    parser.add_argument("--attention_backend", choices=["auto", "sdpa", "flash"], default="auto")
     parser.add_argument("--use_muon", action="store_true")
 
     parser.add_argument("--output_dir", default="outputs/miniworld")
@@ -408,7 +432,19 @@ def parse_args() -> argparse.Namespace:
              "0 disables; each event costs one EMA rollout on rank 0.",
     )
     parser.add_argument("--video_log_fps", type=int, default=8, help="Frame rate of the videos logged to W&B.")
-    args = parser.parse_args()
+    return parser
+
+
+def validate_training_args(args: argparse.Namespace) -> None:
+    """Reject precision/optimizer combinations that lack numerical validation."""
+    if args.mixed_precision == "fp16" and args.use_muon:
+        raise ValueError("FP16 training with Muon is not validated; use AdamW instead.")
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse and validate public MiniWorld training arguments."""
+    args = build_parser().parse_args()
+    validate_training_args(args)
     if args.wandb_name is None:
         # Curriculum stages share a parent dir, so the leaf alone ("stage1_lf6")
         # collides across datasets and model scales.
@@ -422,6 +458,22 @@ def main() -> None:
     args = parse_args()
     dist_info = setup_distributed()
     device = torch.device(f"cuda:{dist_info['local_rank']}" if torch.cuda.is_available() else "cpu")
+    cuda_available = torch.cuda.is_available()
+    capability = torch.cuda.get_device_capability(device) if cuda_available else None
+    requested_attention_backend = args.attention_backend
+    args.attention_backend = resolve_attention_backend(
+        requested_attention_backend,
+        cuda_available=cuda_available,
+        capability=capability,
+        flash_available=flash_attention_available(),
+    )
+    dtype = resolve_training_dtype(args.mixed_precision)
+    autocast_enabled = cuda_available and args.mixed_precision in ("fp16", "bf16")
+    print0(
+        f"[Runtime] precision={args.mixed_precision} dtype={dtype} "
+        f"attention={requested_attention_backend}->{args.attention_backend} "
+        f"capability={capability}"
+    )
     torch.backends.cudnn.benchmark = True
     wandb_run = None
 
@@ -450,6 +502,7 @@ def main() -> None:
         target = denoiser.module if hasattr(denoiser, "module") else denoiser
         ema_denoiser = copy.deepcopy(target).requires_grad_(False)
         optimizer = build_optimizer(args, denoiser)
+        scaler = build_grad_scaler(args.mixed_precision, cuda_available=cuda_available)
         global_batch_size = args.batch_size * int(dist_info["world_size"])
         wandb_run = init_wandb(args, global_batch_size)
 
@@ -460,10 +513,12 @@ def main() -> None:
         elif args.resume:
             latest = find_latest_checkpoint(args.output_dir)
             if latest:
-                start_epoch, global_step = load_pretrained(latest, target, ema_denoiser, optimizer)
+                start_epoch, global_step = load_pretrained(
+                    latest, target, ema_denoiser, optimizer, scaler
+                )
 
-        dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32
         last_log_time, last_log_step = time.time(), global_step
+        skipped_steps = 0
         fixed_inputs: Optional[Dict[str, torch.Tensor]] = None
         for epoch in range(start_epoch, args.max_epochs):
             if sampler is not None:
@@ -478,7 +533,9 @@ def main() -> None:
                 if actions is not None:
                     actions = actions.to(device, non_blocking=True)
 
-                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=args.mixed_precision == "bf16" and torch.cuda.is_available()):
+                with torch.no_grad(), torch.autocast(
+                    device_type="cuda", dtype=dtype, enabled=autocast_enabled
+                ):
                     video_for_vae = rearrange(videos, "b t h w c -> b c t h w").contiguous()
                     latents = vae_encode(vae, video_for_vae)
                     _, _, t_latent, h_lat, w_lat = latents.shape
@@ -500,15 +557,22 @@ def main() -> None:
                 log_videos = args.wandb and args.image_log_every > 0 and (global_step + 1) % args.image_log_every == 0
 
                 optimizer.zero_grad(set_to_none=True)
-                with torch.autocast(device_type="cuda", dtype=dtype, enabled=args.mixed_precision == "bf16" and torch.cuda.is_available()):
+                with torch.autocast(
+                    device_type="cuda", dtype=dtype, enabled=autocast_enabled
+                ):
                     outputs = denoiser(latents, cond_seq, history_len=args.history_len, return_pred=log_videos)
                 loss, x_pred, t_noise = outputs if log_videos else (outputs, None, None)
-                loss.backward()
-                if args.grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(denoiser.parameters(), args.grad_clip)
-                optimizer.step()
-                update_ema(target, ema_denoiser, args.ema_decay)
-                global_step += 1
+                step_result = backward_and_step(
+                    loss,
+                    optimizer,
+                    denoiser.parameters(),
+                    scaler=scaler if scaler.is_enabled() else None,
+                    max_grad_norm=args.max_grad_norm,
+                )
+                skipped_steps += int(step_result.skipped)
+                if not step_result.skipped:
+                    update_ema(target, ema_denoiser, args.ema_decay)
+                    global_step += 1
 
                 if global_step % args.log_every == 0:
                     now = time.time()
@@ -518,7 +582,11 @@ def main() -> None:
                     current_lr = float(optimizer.param_groups[0]["lr"])
                     print0(
                         f"[Train] epoch={epoch} step={step} global_step={global_step} "
-                        f"loss={loss_value:.6f} lr={current_lr:.2e} speed={steps_per_sec:.2f} step/s"
+                        f"loss={loss_value:.6f} lr={current_lr:.2e} "
+                        f"grad_norm={step_result.grad_norm:.4f} "
+                        f"loss_scale={step_result.loss_scale:.1f} "
+                        f"skipped={step_result.skipped} skipped_total={skipped_steps} "
+                        f"speed={steps_per_sec:.2f} step/s"
                     )
                     if wandb_run is not None:
                         wandb_run.log(
@@ -529,6 +597,10 @@ def main() -> None:
                                 # Comparable across curriculum stages, unlike
                                 # step/s, since each stage uses its own batch size.
                                 "train/sample_per_sec": steps_per_sec * global_batch_size,
+                                "train/grad_norm": step_result.grad_norm,
+                                "train/loss_scale": step_result.loss_scale,
+                                "train/skipped_step": int(step_result.skipped),
+                                "train/skipped_steps_total": skipped_steps,
                                 "epoch": int(epoch),
                             },
                             step=global_step,
@@ -561,6 +633,7 @@ def main() -> None:
                         model=target,
                         ema_model=ema_denoiser,
                         optimizer=optimizer,
+                        scaler=scaler if scaler.is_enabled() else None,
                         epoch=epoch + 1,
                         global_step=global_step,
                     )
@@ -572,6 +645,7 @@ def main() -> None:
                     model=target,
                     ema_model=ema_denoiser,
                     optimizer=optimizer,
+                    scaler=scaler if scaler.is_enabled() else None,
                     epoch=epoch + 1,
                     global_step=global_step,
                 )
@@ -583,4 +657,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
