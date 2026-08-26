@@ -188,12 +188,16 @@ class Attention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         proj_drop: float = 0.0,
+        attention_backend: str = "flash",
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
+        if attention_backend not in ("sdpa", "flash"):
+            raise ValueError(f"Unknown resolved attention backend: {attention_backend!r}")
+        self.attention_backend = attention_backend
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.q_norm = RMSNorm(self.head_dim) if qk_norm else nn.Identity()
@@ -225,11 +229,15 @@ class Attention(nn.Module):
             k = torch.cat([k_past.to(dtype=k.dtype, device=k.device), k], dim=-2)
             v = torch.cat([v_past.to(dtype=v.dtype, device=v.device), v], dim=-2)
 
-        if attn_mask is None and past_kv is None:
+        if self.attention_backend == "flash" and attn_mask is None and past_kv is None:
+            if flash_attn_func is None:
+                raise RuntimeError(
+                    "FlashAttention backend is unavailable; select the sdpa backend instead."
+                )
             # flash-attn fast path expects (B, N, num_heads, head_dim)
-            q = q.transpose(1, 2).to(torch.bfloat16)
-            k = k.transpose(1, 2).to(torch.bfloat16)
-            v = v.transpose(1, 2).to(torch.bfloat16)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
             x = flash_attn_func(q, k, v, causal=False).transpose(1, 2)
         else:
             x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
@@ -521,11 +529,18 @@ class MiniWorldBlock(nn.Module):
         mlp_ratio: float = 4.0,
         use_qknorm: bool = False,
         lora_dim: int = 256,
+        attention_backend: str = "flash",
     ) -> None:
         super().__init__()
         self.norm1 = RMSNorm(hidden_size)
         self.norm2 = RMSNorm(hidden_size)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, qk_norm=use_qknorm)
+        self.attn = Attention(
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            qk_norm=use_qknorm,
+            attention_backend=attention_backend,
+        )
         mlp_hidden = int(hidden_size * mlp_ratio)
         self.mlp = SwiGLUFFN(hidden_size, int(2 / 3 * mlp_hidden))
         self.modulation = BlockModulation(hidden_size, adaln_mode, n_mod_chunks=6, lora_dim=lora_dim)
@@ -602,6 +617,7 @@ class MiniWorldModel(nn.Module):
         adaln_lora_dim: int = 256,
         cond_dropout_prob: float = 0.0,
         action_null_first: bool = True,
+        attention_backend: str = "flash",
         # Kept for checkpoint compatibility; MiniWorld always uses RoPE.
         use_rope: bool = True,
         use_abs_pos: bool = False,
@@ -624,6 +640,7 @@ class MiniWorldModel(nn.Module):
         # Route the true first latent frame (the seed / initial observation,
         # which has no preceding action) through the learned ``null_action``.
         self.action_null_first = action_null_first
+        self.attention_backend = attention_backend
         # RoPE-only: kept as attributes for downstream code / streaming asserts.
         self.use_rope = True
         self.use_abs_pos = False
@@ -679,6 +696,7 @@ class MiniWorldModel(nn.Module):
                     mlp_ratio=mlp_ratio,
                     use_qknorm=use_qknorm,
                     lora_dim=adaln_lora_dim,
+                    attention_backend=attention_backend,
                 )
                 for _ in range(depth)
             ]
