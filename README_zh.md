@@ -66,7 +66,8 @@ MiniWorld 融合了 chunk 级 Diffusion Forcing、非递减噪声调度、长上
 - PyTorch SDPA，或在受支持 GPU 上使用可选的 FlashAttention
 - 复现默认训练配方建议 8 卡；推理单卡即可
 
-MiniWorld 依赖 CUDA、NCCL、bf16 和 FlashAttention，目前不支持纯 CPU 与 macOS 运行。
+MiniWorld 依赖 CUDA 和 NCCL。上游优化配方使用 BF16 与 FlashAttention，
+下文的 V100 路径则使用 FP16 和 PyTorch SDPA。目前不支持纯 CPU 与 macOS 运行。
 
 ### 创建环境
 

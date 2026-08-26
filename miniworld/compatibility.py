@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 from typing import Literal, Optional, Tuple
 
 import torch
@@ -14,8 +14,12 @@ SamplePrecision = Literal["auto", "fp16", "bf16", "fp32"]
 
 
 def flash_attention_available() -> bool:
-    """Return whether the optional FlashAttention package is discoverable."""
-    return importlib.util.find_spec("flash_attn") is not None
+    """Return whether the optional FlashAttention function imports successfully."""
+    try:
+        module = importlib.import_module("flash_attn")
+    except (ImportError, OSError):
+        return False
+    return callable(getattr(module, "flash_attn_func", None))
 
 
 def _format_capability(capability: Optional[Tuple[int, int]]) -> str:

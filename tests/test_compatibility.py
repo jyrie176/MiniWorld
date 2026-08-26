@@ -9,12 +9,23 @@ from miniworld.compatibility import (
 )
 
 
-def test_flash_attention_availability_uses_import_spec(monkeypatch):
+def test_flash_attention_availability_requires_successful_import(monkeypatch):
+    module = type("FlashModule", (), {"flash_attn_func": lambda: None})()
     monkeypatch.setattr(
-        "miniworld.compatibility.importlib.util.find_spec",
-        lambda name: object() if name == "flash_attn" else None,
+        "miniworld.compatibility.importlib.import_module", lambda name: module
     )
     assert flash_attention_available() is True
+
+
+@pytest.mark.parametrize("error", [ImportError("missing"), OSError("broken binary")])
+def test_flash_attention_unavailable_when_import_fails(monkeypatch, error):
+    def fail_import(name):
+        raise error
+
+    monkeypatch.setattr(
+        "miniworld.compatibility.importlib.import_module", fail_import
+    )
+    assert flash_attention_available() is False
 
 
 def test_v100_auto_attention_uses_sdpa():

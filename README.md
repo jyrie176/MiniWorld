@@ -68,7 +68,9 @@ Key components:
 - PyTorch SDPA, or optional FlashAttention on supported GPUs
 - 8 GPUs are recommended for reproducing the default training recipe; inference uses one GPU
 
-MiniWorld relies on CUDA, NCCL, bf16, and FlashAttention. CPU-only and macOS execution are not currently supported.
+MiniWorld relies on CUDA and NCCL. Its upstream optimized recipe uses BF16 and
+FlashAttention, while the V100 path below uses FP16 and PyTorch SDPA. CPU-only
+and macOS execution are not currently supported.
 
 ### Create the environment
 

@@ -41,7 +41,7 @@ from torch.utils.checkpoint import checkpoint
 
 try:
     from flash_attn import flash_attn_func
-except ImportError:
+except (ImportError, OSError):
     flash_attn_func = None
 
 # FlexAttention is optional; disabled by default
