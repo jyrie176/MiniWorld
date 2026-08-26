@@ -3,7 +3,7 @@ torchvision
 numpy
 einops
 decord
-flash-attn
+# Optional on supported SM80+ GPUs: install flash-attn separately.
 pandas
 pyarrow
 Pillow

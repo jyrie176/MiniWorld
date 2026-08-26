@@ -15,6 +15,10 @@ VAE_CKPT="${VAE_CKPT:?Set VAE_CKPT to Wan2.2_VAE.pth}"
 FILTER_CACHE_DIR="${FILTER_CACHE_DIR:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_DIR}/outputs/re10k_${MODEL}}"
 WANDB_PROJECT="${WANDB_PROJECT:-miniworld}"
+MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
+MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
+USE_MUON="${USE_MUON:-1}"
 
 STAGE1_LATENT_FRAMES="${STAGE1_LATENT_FRAMES:-6}"
 STAGE2_LATENT_FRAMES="${STAGE2_LATENT_FRAMES:-16}"
@@ -48,10 +52,15 @@ COMMON_ARGS=(
   --df_chunk_size 2
   --num_workers 8
   --prefetch_factor 2
-  --mixed_precision bf16
-  --use_muon
+  --mixed_precision "${MIXED_PRECISION}"
+  --attention_backend "${ATTENTION_BACKEND}"
+  --max_grad_norm "${MAX_GRAD_NORM}"
   --wandb_project "${WANDB_PROJECT}"
 )
+
+if [[ "${USE_MUON}" == "1" ]]; then
+  COMMON_ARGS+=(--use_muon)
+fi
 
 if [[ -n "${FILTER_CACHE_DIR}" ]]; then
   COMMON_ARGS+=(--dataset_filter_cache_dir "${FILTER_CACHE_DIR}")
@@ -99,4 +108,3 @@ echo "Stage 4/4: latent_frames=${STAGE4_LATENT_FRAMES}, batch=${STAGE4_BATCH_SIZ
   --output_dir "${OUTPUT_DIR}/stage4_lf${STAGE4_LATENT_FRAMES}"
 
 echo "Done: ${OUTPUT_DIR}/stage4_lf${STAGE4_LATENT_FRAMES}/last.pt"
-
