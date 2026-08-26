@@ -39,7 +39,10 @@ from einops import rearrange, repeat
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from flash_attn import flash_attn_func
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
 
 # FlexAttention is optional; disabled by default
 create_block_mask = None
