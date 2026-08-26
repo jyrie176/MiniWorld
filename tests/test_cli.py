@@ -2,7 +2,11 @@ import pytest
 import torch
 
 from miniworld.train import build_grad_scaler, build_parser, validate_training_args
-from miniworld.sample import apply_action_variant, build_parser as build_sample_parser
+from miniworld.sample import (
+    apply_action_variant,
+    build_parser as build_sample_parser,
+    read_checkpoint,
+)
 
 
 def _required_train_args():
@@ -92,6 +96,34 @@ def test_sampling_parser_accepts_reproducible_action_controls():
 
     assert args.seed == 123
     assert args.action_variant == "shuffle"
+
+
+@pytest.mark.parametrize("source", ["ema", "model"])
+def test_sampling_parser_accepts_checkpoint_weight_source(source):
+    args = build_sample_parser().parse_args(
+        _required_sample_args() + ["--weights_source", source]
+    )
+
+    assert args.weights_source == source
+
+
+def test_read_checkpoint_selects_requested_weights(tmp_path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "model": {"weight": torch.tensor([1.0])},
+            "ema_model": {"weight": torch.tensor([2.0])},
+            "meta": {"wm_model": "B"},
+        },
+        checkpoint,
+    )
+
+    model_weights, model_meta = read_checkpoint(checkpoint, "model")
+    ema_weights, ema_meta = read_checkpoint(checkpoint, "ema")
+
+    torch.testing.assert_close(model_weights["weight"], torch.tensor([1.0]))
+    torch.testing.assert_close(ema_weights["weight"], torch.tensor([2.0]))
+    assert model_meta == ema_meta == {"wm_model": "B"}
 
 
 def test_zero_action_variant_removes_action_conditioning():

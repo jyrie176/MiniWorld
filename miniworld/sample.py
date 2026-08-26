@@ -121,12 +121,19 @@ def build_denoiser(args: argparse.Namespace):
     return build_denoiser_from_mode(cfg)
 
 
-def read_checkpoint(path: str) -> Tuple[Dict[str, torch.Tensor], Dict[str, object]]:
-    """Read EMA weights and metadata without touching the model."""
+def read_checkpoint(
+    path: str | os.PathLike[str], weights_source: str = "ema"
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, object]]:
+    """Read the requested training or EMA weights and checkpoint metadata."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    weights = ckpt.get("ema_model", ckpt.get("model"))
+    if weights_source == "ema":
+        weights = ckpt.get("ema_model", ckpt.get("model"))
+    elif weights_source == "model":
+        weights = ckpt.get("model")
+    else:
+        raise ValueError(f"unknown checkpoint weights source: {weights_source}")
     if weights is None:
-        raise ValueError(f"Checkpoint has neither ema_model nor model: {path}")
+        raise ValueError(f"Checkpoint has no {weights_source} weights: {path}")
     return weights, ckpt.get("meta", {})
 
 
@@ -259,6 +266,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pose_dir", default=None)
     parser.add_argument("--dataset_filter_cache_dir", default=None)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument(
+        "--weights_source",
+        choices=["ema", "model"],
+        default="ema",
+        help="Checkpoint weights used for sampling; EMA remains the default.",
+    )
     parser.add_argument("--vae_checkpoint", required=True)
     parser.add_argument("--sample_dir", default="samples")
     parser.add_argument("--sample_num_videos", type=int, default=8)
@@ -396,10 +409,13 @@ def main() -> None:
         dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
 
     vae = load_wan22_vae(args)
-    weights, meta = read_checkpoint(args.checkpoint)
+    weights, meta = read_checkpoint(args.checkpoint, args.weights_source)
     args.latent_frames = resolve_latent_frames(weights, meta, args)
     args.wm_model = resolve_wm_model(meta, args)
-    print0(f"[Checkpoint] {args.checkpoint}: wm_model={args.wm_model}, latent_frames={args.latent_frames}")
+    print0(
+        f"[Checkpoint] {args.checkpoint}: source={args.weights_source}, "
+        f"wm_model={args.wm_model}, latent_frames={args.latent_frames}"
+    )
     denoiser = build_denoiser(args).to(device).eval()
     load_weights(weights, denoiser)
     if int(meta.get("trained_num_frames", 0)) > 0:
