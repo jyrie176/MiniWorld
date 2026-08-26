@@ -63,7 +63,7 @@ MiniWorld 融合了 chunk 级 Diffusion Forcing、非递减噪声调度、长上
 - Linux，且具备 NVIDIA CUDA GPU
 - Python 3.11
 - 与 CUDA 匹配的 PyTorch 2.x
-- FlashAttention
+- PyTorch SDPA，或在受支持 GPU 上使用可选的 FlashAttention
 - 复现默认训练配方建议 8 卡；推理单卡即可
 
 MiniWorld 依赖 CUDA、NCCL、bf16 和 FlashAttention，目前不支持纯 CPU 与 macOS 运行。
@@ -79,18 +79,40 @@ conda activate miniworld
 # 安装与你的 CUDA 版本匹配的 PyTorch，这里以 CUDA 12.4 为例。
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# FlashAttention 编译时需要读取已安装的 PyTorch，因此要加 --no-build-isolation。
 pip install -r requirements.txt --no-build-isolation
+
+# 可选：仅用于受支持的 SM80+ GPU。
+pip install flash-attn --no-build-isolation
 ```
 
 验证安装：
 
 ```bash
-python -c "import torch, flash_attn; print('PyTorch:', torch.__version__, '| CUDA:', torch.version.cuda)"
+python -c "import torch; print('PyTorch:', torch.__version__, '| CUDA:', torch.version.cuda)"
 ```
 
 > [!IMPORTANT]
 > 本仓库刻意保持轻量，目前不提供 `setup.py` 或 `pyproject.toml`。请在仓库根目录执行命令；若要在其他位置调用这些 Python 模块，请在命令前加上 `PYTHONPATH=.`。
+
+### Tesla V100 兼容路径
+
+Tesla V100（SM70）不能使用主流 FlashAttention-2 CUDA 后端，也没有默认
+训练配方所依赖的 BF16 Tensor Core 路径。已验证的 V100 兼容方案使用
+PyTorch SDPA、FP16 动态 loss scaling 和 AdamW：
+
+```bash
+NPROC_PER_NODE=1 \
+MIXED_PRECISION=fp16 \
+ATTENTION_BACKEND=auto \
+USE_MUON=0 \
+MAX_GRAD_NORM=1.0 \
+bash scripts/train_droid.sh
+```
+
+在 SM70 上，`ATTENTION_BACKEND=auto` 会解析为 `sdpa`；采样时
+`PRECISION=auto` 会解析为 FP16。显式请求不可用的 FlashAttention 会给出
+错误，而不会静默切换 backend。无资产兼容测试不需要 VAE、数据集或模型
+checkpoint；端到端训练仍然需要这些资产。
 
 ## 数据与权重
 
