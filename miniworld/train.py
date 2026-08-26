@@ -81,6 +81,10 @@ def update_ema(model: torch.nn.Module, ema_model: torch.nn.Module, decay: float)
 
 def build_dataset(args: argparse.Namespace, *, randomize: bool, color_aug: bool):
     """Build the configured training dataset."""
+    overfit_single_sample = bool(getattr(args, "overfit_single_sample", False))
+    if overfit_single_sample:
+        randomize = False
+        color_aug = False
     num_raw_frames = 4 * (int(args.latent_frames) - 1) + 1
     if args.dataset == "droid":
         return LeRobotActionDataset(
@@ -94,6 +98,7 @@ def build_dataset(args: argparse.Namespace, *, randomize: bool, color_aug: bool)
             randomize=randomize,
             color_aug=color_aug,
             require_success=True,
+            max_keep=1 if overfit_single_sample else None,
         )
     return RealEstate10KDataset(
         dataset_paths=[args.data_root],
@@ -105,6 +110,7 @@ def build_dataset(args: argparse.Namespace, *, randomize: bool, color_aug: bool)
         filter_cache_dir=args.dataset_filter_cache_dir,
         return_pose=True,
         pose_dir=args.pose_dir,
+        max_keep=1 if overfit_single_sample else None,
     )
 
 
@@ -356,6 +362,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resize_h", type=int, default=240)
     parser.add_argument("--resize_w", type=int, default=320)
     parser.add_argument("--frame_interval", type=int, default=1)
+    parser.add_argument(
+        "--overfit_single_sample",
+        action="store_true",
+        help="Use one deterministic clip without color augmentation for pipeline diagnosis.",
+    )
 
     parser.add_argument("--action_camera_views", default="exterior_image_1_left")
     parser.add_argument("--action_keys", default="cartesian_position,gripper_position")
@@ -484,7 +495,7 @@ def main() -> None:
         dataloader = DataLoader(
             dataset,
             batch_size=args.batch_size,
-            shuffle=sampler is None,
+            shuffle=sampler is None and not args.overfit_single_sample,
             sampler=sampler,
             num_workers=args.num_workers,
             pin_memory=True,

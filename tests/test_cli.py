@@ -1,7 +1,12 @@
 import pytest
 import torch
 
-from miniworld.train import build_grad_scaler, build_parser, validate_training_args
+from miniworld.train import (
+    build_dataset,
+    build_grad_scaler,
+    build_parser,
+    validate_training_args,
+)
 from miniworld.sample import (
     apply_action_variant,
     build_parser as build_sample_parser,
@@ -48,6 +53,25 @@ def test_training_parser_rejects_fp16_muon_combination():
     )
     with pytest.raises(ValueError, match="FP16.*Muon"):
         validate_training_args(args)
+
+
+def test_overfit_single_sample_disables_dataset_randomness(monkeypatch):
+    args = build_parser().parse_args(
+        _required_train_args() + ["--overfit_single_sample"]
+    )
+    captured = {}
+
+    class CapturingDataset:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("miniworld.train.LeRobotActionDataset", CapturingDataset)
+
+    build_dataset(args, randomize=True, color_aug=True)
+
+    assert captured["randomize"] is False
+    assert captured["color_aug"] is False
+    assert captured["max_keep"] == 1
 
 
 @pytest.mark.parametrize(
