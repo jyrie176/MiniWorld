@@ -68,6 +68,17 @@ def test_manifest_validation_rejects_inconsistent_checkpoint():
         validate_manifests(manifests)
 
 
+def test_manifest_validation_rejects_unknown_git_commit():
+    manifests = make_manifests(
+        seeds=[11, 22, 33, 44], episodes=list(range(1064, 1080))
+    )
+    for manifest in manifests:
+        manifest["git_commit"] = "unknown"
+
+    with pytest.raises(ValueError, match="git commit"):
+        validate_manifests(manifests)
+
+
 def test_manifest_validation_requires_four_unless_incomplete():
     manifests = make_manifests(seeds=[11, 22], episodes=[1064])
 

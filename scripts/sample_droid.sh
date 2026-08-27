@@ -15,6 +15,14 @@ SAMPLE_DIR="${SAMPLE_DIR:-${REPO_DIR}/samples/droid_${MODEL}}"
 GPU="${GPU:-0}"
 PRECISION="${PRECISION:-auto}"
 ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
+SEED="${SEED:-0}"
+ACTION_VARIANT="${ACTION_VARIANT:-real}"
+SAVE_LATENTS="${SAVE_LATENTS:-0}"
+
+SAMPLE_EXTRA_ARGS=()
+if [[ "${SAVE_LATENTS}" == "1" ]]; then
+  SAMPLE_EXTRA_ARGS+=(--save_latents)
+fi
 
 CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --dataset droid \
@@ -25,6 +33,8 @@ CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --wm_model "${MODEL}" \
   --precision "${PRECISION}" \
   --attention_backend "${ATTENTION_BACKEND}" \
+  --seed "${SEED}" \
+  --action_variant "${ACTION_VARIANT}" \
   --total_len "${TOTAL_LEN:-64}" \
   --df_chunk_size 2 \
   --df_ardiff_step "${DF_ARDIFF_STEP:-5}" \
@@ -33,4 +43,5 @@ CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --stream_sink_size "${STREAM_SINK_SIZE:-1}" \
   --cfg_scale "${CFG_SCALE:-2.0}" \
   --num_sampling_steps "${NUM_SAMPLING_STEPS:-100}" \
-  --sample_num_videos "${SAMPLE_NUM_VIDEOS:-50}"
+  --sample_num_videos "${SAMPLE_NUM_VIDEOS:-50}" \
+  "${SAMPLE_EXTRA_ARGS[@]}"

@@ -29,6 +29,7 @@ def _run_launcher(tmp_path: Path, script: str, command: str, extra_env):
         VAE_CKPT="/fake/vae.pt",
         CKPT="/fake/model.pt",
         POSE_DIR="/fake/poses",
+        MINIWORLD_GIT_COMMIT="test-commit",
         **extra_env,
     )
     result = subprocess.run(
@@ -97,6 +98,55 @@ def test_sampling_launchers_forward_precision_and_backend(tmp_path, script):
     assert len(lines) == 1
     assert "--precision fp16" in lines[0]
     assert "--attention_backend sdpa" in lines[0]
+
+
+def test_droid_sampling_launcher_forwards_uncertainty_export_controls(tmp_path):
+    lines = _run_launcher(
+        tmp_path,
+        "scripts/sample_droid.sh",
+        "python",
+        {
+            "SEED": "123",
+            "ACTION_VARIANT": "real",
+            "SAVE_LATENTS": "1",
+            "TOTAL_LEN": "6",
+            "SAMPLE_NUM_VIDEOS": "16",
+        },
+    )
+
+    assert len(lines) == 1
+    assert "--seed 123" in lines[0]
+    assert "--action_variant real" in lines[0]
+    assert "--save_latents" in lines[0]
+    assert "--total_len 6" in lines[0]
+    assert "--sample_num_videos 16" in lines[0]
+
+
+def test_uncertainty_launcher_runs_four_seeds_then_evaluator(tmp_path):
+    lines = _run_launcher(
+        tmp_path,
+        "scripts/evaluate_droid_uncertainty.sh",
+        "python",
+        {
+            "OUTPUT_ROOT": str(tmp_path / "formal"),
+            "GPU": "0",
+            "SEEDS": "11,22,33,44",
+        },
+    )
+
+    assert len(lines) == 5
+    for index, seed in enumerate((11, 22, 33, 44)):
+        assert f"--seed {seed}" in lines[index]
+        assert "--wm_model 0.5B" in lines[index]
+        assert "--precision fp16" in lines[index]
+        assert "--attention_backend sdpa" in lines[index]
+        assert "--action_variant real" in lines[index]
+        assert "--save_latents" in lines[index]
+        assert "--total_len 6" in lines[index]
+        assert "--num_sampling_steps 20" in lines[index]
+        assert "--sample_num_videos 16" in lines[index]
+    assert "scripts/evaluate_droid_uncertainty.py" in lines[-1]
+    assert lines[-1].count("--sample_root") == 4
 
 
 def test_flash_attention_is_not_a_mandatory_requirement():

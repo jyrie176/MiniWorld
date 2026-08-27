@@ -8,6 +8,7 @@ from miniworld.train import (
     validate_training_args,
 )
 from miniworld.sample import (
+    _git_commit,
     apply_action_variant,
     build_sampling_manifest,
     build_parser as build_sample_parser,
@@ -203,6 +204,27 @@ def test_build_sampling_manifest_records_reproducibility_identity():
     assert manifest["sampling"]["total_len"] == 6
     assert manifest["sampling"]["precision"] == "fp16"
     assert manifest["sampling"]["attention_backend"] == "sdpa"
+
+
+def test_git_commit_prefers_explicit_container_identity(monkeypatch):
+    monkeypatch.setenv("MINIWORLD_GIT_COMMIT", "container-visible-commit")
+
+    assert _git_commit() == "container-visible-commit"
+
+
+def test_sampling_manifest_rejects_unknown_git_identity():
+    args = build_sample_parser().parse_args(_required_sample_args())
+
+    with pytest.raises(ValueError, match="git commit"):
+        build_sampling_manifest(
+            args,
+            [],
+            {
+                "checkpoint_sha256": "checkpoint-hash",
+                "data_manifest_sha256": "data-hash",
+                "git_commit": "unknown",
+            },
+        )
 
 
 @pytest.mark.parametrize("source", ["ema", "model"])

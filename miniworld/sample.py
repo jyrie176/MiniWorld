@@ -89,6 +89,10 @@ def build_sampling_manifest(
     identities: dict[str, str],
 ) -> dict[str, object]:
     """Build the reproducibility record for an exported latent ensemble member."""
+    if identities.get("git_commit") in (None, "", "unknown"):
+        raise ValueError(
+            "git commit identity is required; set MINIWORLD_GIT_COMMIT in containers"
+        )
     sampling_keys = (
         "total_len",
         "history_len",
@@ -132,6 +136,9 @@ def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
 
 
 def _git_commit() -> str:
+    explicit = os.environ.get("MINIWORLD_GIT_COMMIT", "").strip()
+    if explicit:
+        return explicit
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],

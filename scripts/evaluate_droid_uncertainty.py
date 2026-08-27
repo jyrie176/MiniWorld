@@ -89,6 +89,8 @@ def validate_manifests(
         raise ValueError("uncertainty evaluator requires DROID manifests")
     if reference.get("action_variant") != "real":
         raise ValueError("formal uncertainty evaluation requires real actions")
+    if reference.get("git_commit") in (None, "", "unknown"):
+        raise ValueError("sampling manifests must record a concrete git commit")
 
     return {
         "schema_version": 1,
