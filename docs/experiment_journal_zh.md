@@ -743,6 +743,58 @@ EMA decay `0.9999` 下 20 次更新只产生极小变化，因此结论是“训
 
 独立报告：`docs/results/v100-official-055b-continued-smoke.md`。
 
+### 阶段 O：官方 0.55B 双卡 DDP / Resource Gate
+
+#### 问题与主线位置
+
+在等效 global batch=2 下，对比单卡 batch=2 与双卡每卡 batch=1，验证 DDP sampler、梯度同步、
+FP16 稳定性、吞吐、每卡显存、checkpoint 和恢复。对应 Phase 4 / E2、E3、E8，是选择正式
+continued-training 预算前的最后一个工程 gate。
+
+#### 配置与 sampler
+
+两组均从官方 0.55B 裸 state dict 初始化，使用 train episodes 1000-1063、6 latent frames、AdamW、
+LR `2e-5`、EMA `0.9999`、FP16/SDPA、seed base `20260827`，各跑 10 个有效 step。
+
+64-episode DistributedSampler 实测 rank 0/1 各 32 个索引，交集为 0，并集为 64；没有 rank 间
+episode 重复或遗漏。
+
+#### DDP loss 遥测修复
+
+首次 DDP 训练的梯度同步正确，但打印/W&B loss 只取 rank 0 本地 batch，不能与单卡 global batch
+严格比较。新增失败回归测试后，将日志 loss 改为所有 rank all-reduce 均值；修复不改变 backward、
+optimizer 或 checkpoint。使用修复后的独立双卡 run 作为 loss 对照。
+
+#### 结果
+
+| 指标 | 单卡 GB2 | 双卡 GB2 |
+| --- | ---: | ---: |
+| 10 点 mean loss | 0.1154 | 0.1037 |
+| median loss | 0.1015 | 0.1014 |
+| loss range | 0.0519-0.2001 | 0.0535-0.1650 |
+| steady step/s | 0.516 | 0.860 |
+| steady sample/s | 1.031 | 1.720 |
+| 训练态显存 | 18,169 MiB | 每卡 19,611 MiB |
+| skipped step | 0 | 0 |
+| loss scale | 65,536 | 65,536 |
+
+双卡吞吐加速 `1.67x`，扩展效率约 `83.4%`。两组随机流与 sampler 顺序不相同，不能要求逐 step
+loss 相等；但均值、中位数和范围一致，没有同步或优化异常迹象。双卡每卡额外显存来自 DDP
+reducer/communication 状态，32GB V100 仍剩约 13GB。
+
+#### 恢复验证
+
+双卡 step-10 checkpoint 恢复显示 all keys matched，继续到 step 15；两 rank 训练态显存均为
+`19,611 MiB`，采样时利用率为 100%/95%。最终 checkpoint 为 epoch 2、global step 15，包含 420
+项 model、420 项 EMA、415 项 optimizer state；GradScaler scale `65536`、growth tracker `15`。
+
+W&B：单卡 `fnqph9f6`；初次双卡/恢复 `kmta7zr2`；修复后 global-loss 双卡 `mmweo7q6`。
+
+判断：双卡 DDP/resource gate 通过。下一步选择有边界的 continued-training 正式 baseline 预算与
+validation/checkpoint 节奏；尚不进入 uncertainty-aware 创新阶段。
+
+独立报告：`docs/results/v100-official-055b-ddp-resource-gate.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -754,6 +806,7 @@ EMA decay `0.9999` 下 20 次更新只产生极小变化，因此结论是“训
 7. **旧 recon 不可信：** 反推公式错误已修复，训练与 gen 不受影响。
 8. **validation 只用于选择：** test episodes 1080-1095 继续密封，不能提前反复查看。
 9. **0.55B 单卡 continued-training gate 通过：** FP16、EMA、optimizer、scaler、保存与恢复均稳定。
+10. **0.55B 双卡 DDP gate 通过：** 1.67x 吞吐、83.4% 效率、分片无重复、恢复稳定。
 
 ## 5. 当前产物索引
 
@@ -769,22 +822,17 @@ EMA decay `0.9999` 下 20 次更新只产生极小变化，因此结论是“训
 | 官方 0.55B validation 基线 | `/data/miniworld/experiments/official-055b-validation-action-ablation` |
 | 0.55B 单卡 continued checkpoint | `/data/miniworld/outputs/droid-official-055b-continued-smoke-lf6-20step` |
 | 0.55B step-20 validation | `/data/miniworld/experiments/official-055b-continued-step20-validation-action-ablation` |
+| 0.55B DDP gate | `/data/miniworld/experiments/droid-official-055b-ddp-gate-*` |
 | W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 4，官方 0.55B zero-shot 和单卡 continued-training gate 已建立，准备双卡
-DDP/resource gate**。不继续增加 0.12B 训练步数，也不提前进入创新模块或查看密封 test split。
+当前主线位置：**Phase 4，官方 0.55B zero-shot、单卡和双卡 DDP/resource gate 均已建立，准备
+正式 continued-training baseline**。不继续增加 0.12B 训练步数，也不提前进入创新模块或查看密封
+test split。
 
-### P0：0.55B 双卡 DDP 与资源 gate
-
-在等效 global batch 下比较单卡和双卡短程 loss、数据 sampler、梯度同步、checkpoint 恢复、吞吐和
-每卡显存。通过后才扩大 0.55B continued-training 预算。
-
-主线映射：Phase 4 / E2、E3、E8。
-
-### P1：continued-training baseline 正式对照
+### P0：continued-training baseline 正式对照
 
 使用 validation 选择 checkpoint 与超参数，至少比较：
 

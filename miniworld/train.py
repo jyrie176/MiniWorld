@@ -52,6 +52,15 @@ def is_main_process() -> bool:
     return int(os.environ.get("RANK", "0")) == 0
 
 
+def distributed_mean(value: torch.Tensor) -> float:
+    """Return a scalar averaged across ranks for comparable DDP telemetry."""
+    reduced = value.detach().float().clone()
+    if dist.is_initialized():
+        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+        reduced.div_(dist.get_world_size())
+    return float(reduced)
+
+
 def find_latest_checkpoint(output_dir: str) -> Optional[str]:
     """Return the checkpoint with the largest global step, if any."""
     import re
@@ -592,7 +601,7 @@ def main() -> None:
                     now = time.time()
                     steps_per_sec = (global_step - last_log_step) / max(now - last_log_time, 1e-6)
                     last_log_time, last_log_step = now, global_step
-                    loss_value = float(loss.detach())
+                    loss_value = distributed_mean(loss)
                     current_lr = float(optimizer.param_groups[0]["lr"])
                     print0(
                         f"[Train] epoch={epoch} step={step} global_step={global_step} "

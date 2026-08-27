@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
+from miniworld import train
 from miniworld.train import load_pretrained, save_checkpoint
 
 
@@ -108,3 +109,17 @@ def test_official_bare_state_dict_initializes_model_and_ema(tmp_path):
     ):
         torch.testing.assert_close(actual, expected)
         torch.testing.assert_close(ema_actual, expected)
+
+
+def test_distributed_mean_reports_all_rank_average(monkeypatch):
+    monkeypatch.setattr(train.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(train.dist, "get_world_size", lambda: 2)
+
+    def fake_all_reduce(value, op):
+        value.add_(6.0)
+
+    monkeypatch.setattr(train.dist, "all_reduce", fake_all_reduce)
+
+    result = train.distributed_mean(torch.tensor(2.0))
+
+    assert result == 4.0
