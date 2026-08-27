@@ -1,5 +1,7 @@
 torch
 torchvision
+# torchvision 0.19 write_video still passes string pict_type values.
+av==12.3.0
 numpy
 einops
 decord

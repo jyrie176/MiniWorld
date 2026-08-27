@@ -150,6 +150,24 @@ def test_read_checkpoint_selects_requested_weights(tmp_path):
     assert model_meta == ema_meta == {"wm_model": "B"}
 
 
+def test_read_checkpoint_accepts_official_bare_state_dict(tmp_path):
+    checkpoint = tmp_path / "official.pt"
+    state_dict = {
+        "net.x_embedder.proj.weight": torch.tensor([1.0]),
+        "net.final_layer.linear.bias": torch.tensor([2.0]),
+    }
+    torch.save(state_dict, checkpoint)
+
+    weights, meta = read_checkpoint(checkpoint, "ema")
+
+    assert weights.keys() == state_dict.keys()
+    torch.testing.assert_close(
+        weights["net.x_embedder.proj.weight"],
+        state_dict["net.x_embedder.proj.weight"],
+    )
+    assert meta == {}
+
+
 def test_zero_action_variant_removes_action_conditioning():
     actions = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
 

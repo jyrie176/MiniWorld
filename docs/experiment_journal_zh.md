@@ -607,15 +607,85 @@ gate 未通过。停止无目的追加 0.12B 训练。只诊断会同样阻塞 0
 docs/results/v100-012b-validation-action-ablation.md
 ```
 
+### 阶段 M：官方 0.55B Zero-shot Validation 基线
+
+#### 问题与主线位置
+
+这一步回答两个问题：官方 0.55B DROID checkpoint 在固定 held-out validation 上是否真正使用正确
+动作，以及 0.12B 的负面结果是动作链路错误还是小数据短训模型能力不足。它对应总主线 Phase 4 / E2，
+不是继续扩展 0.12B 支线，也没有提前使用密封 test split。
+
+#### 权重与兼容处理
+
+- 官方文件：`MiniWorld_0_5b_droid.pt`，2,226,856,306 bytes；
+- SHA-256：`e4b118befe88cee7338400c5510fdd497212b9b1988034290030b3ed351ced32`；
+- 文件是 420 项裸 state dict，而不是本项目训练器写出的 `model/ema/meta` 封装；
+- 共 556,675,120 参数，RoPE 表推断训练窗口为 64 latent frames；
+- 为采样器增加裸 state dict 识别，严格加载报告 all keys matched；
+- 固定 `av==12.3.0`，解决 torchvision 0.19 与新版 PyAV 写视频接口不兼容问题。
+
+对应回归测试先失败再修复，`tests/test_cli.py` 26 项通过。另新增统一动作消融评测脚本及合成指标
+测试，明确评分只覆盖未来 RGB frames 1-20，不把观测首帧计入误差。
+
+#### 实验配置
+
+```text
+validation episodes: 1064-1079（16 episodes）
+test episodes: 1080-1095（保持密封）
+checkpoint weights: 官方唯一裸 state dict（无 model/EMA 二选一）
+runtime: V100 + FP16 + SDPA
+rollout: 6 latent frames / 21 RGB frames，首 latent 为观测历史
+sampling steps: 20
+CFG: 2.0
+seed: 20260827 + sample index
+conditions: real / zero-valued normalized action / time-reversed action
+```
+
+三张空闲 V100 分别运行一个条件；每组均生成并成功解码 16 个 MP4，且 timing JSONL 均为 16 行。
+单样本平均生成时间为 real `6.34s`、zero `6.31s`、reverse `6.36s`。
+
+#### 结果
+
+| 条件 | 平均未来帧 MAE | 中位数 MAE |
+| --- | ---: | ---: |
+| real | **5.468** | **5.393** |
+| zero | 9.368 | 8.442 |
+| reverse | 9.241 | 8.068 |
+
+- real 优于 zero：15/16；
+- real 优于 reverse：15/16；
+- real 同时优于两者：14/16；
+- `zero - real = +3.900`，`reverse - real = +3.773`；
+- real 与 zero 输出平均 MAE `6.982`，real 与 reverse 输出平均 MAE `6.936`。
+
+首帧 persistence 平均 MAE 为 `4.468`，real 只在 4/16 episodes 上优于 persistence。该指标偏好静态
+输出，不能替代感知和运动质量评测；但它仍表明当前短 horizon 像素精度尚未全面超过静态强基线。
+
+#### 判断与下一步
+
+官方 0.55B 在完全相同的验证/动作/seed 口径下稳定偏好正确动作，因此动作输入、VAE 时间压缩和
+动作到 latent 的映射没有系统性错位证据。0.12B 的失败主要归因于 64 episodes、5k steps 的小规模
+from-scratch checkpoint，而不是公共推理链路失效。
+
+Phase 4 的 zero-shot gate 已建立。下一步应进行短时 continued-training 冒烟与资源/DDP 验证，并以
+zero-shot 指标为不可回退基线；之后才进入 uncertainty-error correlation 与 adaptive rollout 创新主线。
+
+独立报告：
+
+```text
+docs/results/v100-official-055b-validation-action-ablation.md
+```
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
 2. **训练整体收敛：** 即时 loss 毛刺明显，但分段均值持续下降，没有持续数值发散证据。
 3. **当前首选 EMA：** 在 64-episode 5k checkpoint 的固定样本上，EMA MAE 明显低于普通权重。
-4. **动作条件有影响但证据不足：** real 与 zero 输出不同，但 real 尚未稳定优于 shuffle。
-5. **视频质量仍有限：** 结构保持尚可，局部细节和长时间一致性不足。
-6. **旧 recon 不可信：** 反推公式错误已修复，训练与 gen 不受影响。
-7. **单样本指标不是泛化指标：** 下一步必须做多 episode 评估。
+4. **官方 0.55B 动作控制成立：** real 在 15/16 validation episodes 上分别优于 zero 和 reverse。
+5. **0.12B 负面结果已定位：** 相同链路在官方 0.55B 上通过，问题主要是小模型短训能力不足。
+6. **像素强基线仍未攻克：** 官方 0.55B real 平均 MAE 5.468，高于 persistence 的 4.468。
+7. **旧 recon 不可信：** 反推公式错误已修复，训练与 gen 不受影响。
+8. **validation 只用于选择：** test episodes 1080-1095 继续密封，不能提前反复查看。
 
 ## 5. 当前产物索引
 
@@ -627,72 +697,50 @@ docs/results/v100-012b-validation-action-ablation.md
 | 5k 最终 checkpoint | `/data/miniworld/outputs/droid-v100-64ep-5k/epoch_0079_step_00005000.pt` |
 | 5k 训练日志 | `/data/miniworld/experiments/droid-v100-64ep-5k/train.log` |
 | 5k 固定评估 | `/data/miniworld/experiments/droid-v100-64ep-5k-eval` |
+| 官方 0.55B checkpoint | `/data/miniworld/checkpoints/miniworld-official-0.55b/MiniWorld_0_5b_droid.pt` |
+| 官方 0.55B validation 基线 | `/data/miniworld/experiments/official-055b-validation-action-ablation` |
 | W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 3，0.12B from-scratch sanity 收尾**。以下 P0 项用于关闭 Phase 3 gate，
-完成后进入 0.55B continued-training baseline；不继续无目的地增加 0.12B 训练步数。
+当前主线位置：**Phase 4，官方 0.55B zero-shot baseline 已建立，准备 continued-training**。不继续
+增加 0.12B 训练步数，也不提前进入创新模块或查看密封 test split。
 
-### P0：重新验证正确 recon
+### P0：0.55B continued-training 单卡冒烟
 
-使用最终 5k checkpoint，在固定样本上分别测试 `t=0.1/0.3/0.5/0.7/0.9` 的单步重建，确认：
+从官方裸 state dict 初始化训练器，在 train split 上运行短程单卡 FP16/SDPA 实验，验证：
 
-- 修复后高 timestep 不再因为公式错误直接保留为噪声；
-- 模型真实的单步去噪能力随 timestep 如何变化；
-- recon 与 gen 的差异来自模型能力还是多步误差累积。
+- pretrained 权重进入 model 与 EMA 的规则明确且严格；
+- optimizer、GradScaler、EMA 和 checkpoint 恢复链路稳定；
+- 初始与短训 validation 指标可与本节 zero-shot 基线直接比较；
+- 无 NaN/Inf，记录峰值显存、step time 和吞吐。
 
-### P0：16-episode EMA 动作消融
+只在冒烟稳定后决定学习率、步数和解冻策略，不直接启动昂贵长训。
 
-对 16 个固定 episode 运行：
+### P0：0.55B 双卡 DDP 与资源 gate
 
-- EMA + real；
-- EMA + zero；
-- EMA + shuffle。
+在等效 global batch 下比较单卡和双卡短程 loss、数据 sampler、梯度同步、checkpoint 恢复、吞吐和
+每卡显存。通过后才扩大 0.55B continued-training 预算。
 
-报告平均 MAE、中位数、逐 episode real 胜率和代表性视频。只有 real 在多数 episode 上优于两个对照，
-才能初步认为动作条件学习有效。
+主线映射：Phase 4 / E2、E3、E8。
 
-### P0（数据划分已完成）：固定 validation split 与 0.12B 验收
+### P1：continued-training baseline 正式对照
 
-建立按 episode 隔离、可审计的 validation/test manifest，不再仅使用训练 episode 判断泛化。汇总：
+使用 validation 选择 checkpoint 与超参数，至少比较：
 
-- train 与 validation 的短 horizon 指标；
-- checkpoint 选择规则；
-- 普通权重与 EMA；
-- 动作消融；
-- 成功、失败和高误差样例。
+- 官方 zero-shot；
+- continued-training checkpoint 的 real/zero/reverse；
+- persistence、RGB MAE，以及新增的感知/运动指标；
+- 质量变化、训练成本、采样吞吐和显存。
 
-主线映射：Phase 3 / E1 / “0.12B sanity 可复现并有可检查短 rollout”。
+只有在动作控制不退化且整体收益可解释时，才冻结 Phase 4 baseline。test split 仅在方案冻结后使用一次。
 
-### P0：双卡 DDP 与资源基线
+### P2：进入项目创新主线
 
-在等效 global batch 下比较单卡和双卡短程 loss 趋势，验证 sampler 分片、梯度同步、checkpoint
-恢复、每卡显存和吞吐。通过后才允许把 0.55B 正式训练迁移到 2–3 卡。
-
-主线映射：Phase 3 / E3、E8 / “双卡无 hang、无数据重复错误，训练与恢复稳定”。
-
-### P1：进入 0.55B continued-training baseline
-
-Phase 3 验收完成后：
-
-1. 下载并校验 MiniWorld 上游 0.55B DROID checkpoint；
-2. 在固定 validation/test manifest 上运行 pretrained zero-shot baseline；
-3. 设计短时序 continued-training 小实验，先验证权重严格加载和 FP16/DDP 稳定性；
-4. 相对 zero-shot 比较质量、显存、吞吐和成本，再决定正式训练预算。
-
-主线映射：Phase 4 / E2 / “0.55B baseline 稳定且相对 zero-shot 有可解释变化”。
-
-### P1：根据 0.12B 评估结果选择诊断方向
-
-- real 稳定获胜：关闭动作条件 sanity 项，按计划进入 0.55B baseline，而不是继续堆叠 0.12B 步数。
-- real 与 shuffle 接近：优先核对动作和视频时间对齐，并调整动作条件训练/CFG。
-- recon 好、gen 差：处理多步误差累积和流式 rollout 设置。
-- recon 本身差：继续优化 denoiser 训练，而不是先增加 rollout 长度。
-
-这些诊断只用于关闭 0.12B sanity gate；除非发现会阻塞 0.55B 的正确性问题，否则不扩展为新的
-小模型长期训练支线。
+Phase 4 gate 通过后按既定路线推进：uncertainty-error correlation → uncertainty-aware adaptive rollout →
+horizon/threshold/K/OOD/resource ablations。若 continued training 无收益，仍以官方 zero-shot 作为创新
+基线，不回到无目的的 0.12B 训练。
 
 ## 7. 后续记录规范
 

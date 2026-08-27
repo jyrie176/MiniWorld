@@ -126,6 +126,8 @@ def read_checkpoint(
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, object]]:
     """Read the requested training or EMA weights and checkpoint metadata."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if ckpt and all(isinstance(key, str) and torch.is_tensor(value) for key, value in ckpt.items()):
+        return ckpt, {}
     if weights_source == "ema":
         weights = ckpt.get("ema_model", ckpt.get("model"))
     elif weights_source == "model":
