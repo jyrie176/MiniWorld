@@ -4,11 +4,15 @@ import numpy as np
 from miniworld.rollout_policy import (
     Decision,
     aggregate_policy_results,
+    choose_operating_point,
+    evaluate_offline_gate,
     fixed_policy,
     matched_fixed_baseline,
+    run_loeo,
     score_policy_trace,
     smoothed_hysteretic_policy,
     threshold_policy,
+    threshold_candidates,
 )
 
 
@@ -92,3 +96,63 @@ def test_matched_fixed_baseline_interpolates_expected_numerators():
     assert result["mean_horizon"] == pytest.approx(3.5)
     assert result["coverage"] == pytest.approx(0.7)
     assert result["retained_rgb_mae"] == pytest.approx(12.0 / 3.5)
+
+
+def test_threshold_candidates_use_only_training_values():
+    candidates = threshold_candidates([0.1, 0.2, 0.3])
+
+    assert 99.0 not in candidates
+    assert candidates[0] < 0.1 and candidates[-1] > 0.3
+
+
+def test_operating_point_prefers_lower_error_then_coverage_then_higher_tau():
+    candidates = [
+        {"tau": 0.6, "coverage": 0.8, "retained_rgb_mae": 2.0},
+        {"tau": 0.8, "coverage": 0.7, "retained_rgb_mae": 1.0},
+        {"tau": 0.7, "coverage": 0.8, "retained_rgb_mae": 2.0},
+        {"tau": 0.5, "coverage": 0.9, "retained_rgb_mae": 2.0},
+    ]
+
+    selected = choose_operating_point(candidates, target_coverage=0.8)
+
+    assert selected["retained_rgb_mae"] == pytest.approx(2.0)
+    assert selected["coverage"] == pytest.approx(0.9)
+    assert selected["tau"] == pytest.approx(0.5)
+
+
+def test_loeo_never_passes_held_out_uncertainty_to_candidate_builder():
+    rows = []
+    for episode in range(1064, 1080):
+        for step in range(1, 6):
+            rows.append(
+                {
+                    "episode": episode,
+                    "future_latent_step": step,
+                    "uncertainty_latent": float(episode * 10 + step),
+                    "error_rgb": float(step),
+                    **{f"error_seed_{index}": float(step) for index in range(4)},
+                }
+            )
+
+    folds, _ = run_loeo(rows, "threshold")
+
+    for fold in folds:
+        held_out = fold["held_out_episode"]
+        assert held_out not in fold["candidate_source_episodes"]
+        held_out_values = {float(held_out * 10 + step) for step in range(1, 6)}
+        assert held_out_values.isdisjoint(fold["threshold_candidates"])
+
+
+def test_gate_requires_nine_episode_wins_and_tail_bound():
+    adaptive = {"coverage": 0.8, "retained_rgb_mae": 4.0, "p90_episode_error": 6.0}
+    fixed = {"retained_rgb_mae": 4.1, "p90_episode_error": 6.05}
+
+    gate = evaluate_offline_gate(adaptive, fixed, [-0.1] * 9 + [0.1] * 7)
+
+    assert gate == {
+        "coverage_at_least_0_80": True,
+        "retained_error_below_matched_fixed": True,
+        "episode_wins_at_least_9_of_16": True,
+        "p90_not_worse_by_more_than_0_10": True,
+        "passed": True,
+    }

@@ -238,3 +238,191 @@ def matched_fixed_baseline(
         "p90_episode_error": float(np.percentile(list(episode_errors.values()), 90)),
         "episode_errors": episode_errors,
     }
+
+
+def threshold_candidates(
+    training_uncertainty: Sequence[float], *, max_candidates: int = 103
+) -> np.ndarray:
+    values = np.asarray(training_uncertainty, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("training uncertainty must be a non-empty finite sequence")
+    if max_candidates < 3:
+        raise ValueError("max_candidates must be at least three")
+    unique = np.unique(values)
+    interior_limit = max_candidates - 2
+    if unique.size <= interior_limit:
+        interior = unique
+    else:
+        interior = np.unique(
+            np.quantile(values, np.linspace(0.0, 1.0, interior_limit))
+        )
+    return np.concatenate(
+        (
+            [np.nextafter(unique[0], -np.inf)],
+            interior,
+            [np.nextafter(unique[-1], np.inf)],
+        )
+    )
+
+
+def choose_operating_point(
+    candidates: Sequence[Mapping[str, object]], *, target_coverage: float = 0.80
+) -> dict[str, object]:
+    if not 0.0 < target_coverage <= 1.0:
+        raise ValueError("target_coverage must lie in (0, 1]")
+    feasible = [
+        dict(candidate)
+        for candidate in candidates
+        if float(candidate["coverage"]) >= target_coverage
+    ]
+    if not feasible:
+        raise ValueError("no threshold candidate reaches target coverage")
+    return min(
+        feasible,
+        key=lambda item: (
+            float(item["retained_rgb_mae"]),
+            -float(item["coverage"]),
+            -float(item["tau"]),
+        ),
+    )
+
+
+def _validate_policy_rows(rows: Sequence[Mapping[str, object]]) -> dict[int, list[Mapping[str, object]]]:
+    by_episode: dict[int, list[Mapping[str, object]]] = defaultdict(list)
+    seen = set()
+    for row in rows:
+        episode = int(row["episode"])
+        step = int(row["future_latent_step"])
+        if (episode, step) in seen:
+            raise ValueError("duplicate episode-step row")
+        seen.add((episode, step))
+        by_episode[episode].append(row)
+    for episode_rows in by_episode.values():
+        episode_rows.sort(key=lambda row: int(row["future_latent_step"]))
+        if [int(row["future_latent_step"]) for row in episode_rows] != list(range(1, 6)):
+            raise ValueError("each episode must contain five ordered future steps")
+    return by_episode
+
+
+def _score_episode_rows(
+    episode: int,
+    rows: Sequence[Mapping[str, object]],
+    policy: str,
+    tau: float,
+) -> EpisodePolicyResult:
+    uncertainty = [float(row["uncertainty_latent"]) for row in rows]
+    if policy == "threshold":
+        trace = threshold_policy(uncertainty, tau)
+    elif policy == "smoothed_hysteretic":
+        trace = smoothed_hysteretic_policy(uncertainty, tau)
+    else:
+        raise ValueError(f"unknown policy: {policy}")
+    step_errors = [float(row["error_rgb"]) for row in rows]
+    seed_errors = np.asarray(
+        [
+            [float(row[f"error_seed_{seed}"]) for row in rows]
+            for seed in range(4)
+        ],
+        dtype=np.float64,
+    )
+    return score_policy_trace(episode, trace, step_errors, seed_errors)
+
+
+def select_threshold(
+    training_rows: Sequence[Mapping[str, object]],
+    policy: str,
+    *,
+    target_coverage: float = 0.80,
+) -> dict[str, object]:
+    by_episode = _validate_policy_rows(training_rows)
+    uncertainties = [
+        float(row["uncertainty_latent"])
+        for episode_rows in by_episode.values()
+        for row in episode_rows
+    ]
+    candidates = threshold_candidates(uncertainties)
+    all_errors = [
+        float(row["error_rgb"])
+        for episode_rows in by_episode.values()
+        for row in episode_rows
+    ]
+    high_error_cutoff = float(np.percentile(all_errors, 75))
+    curve = []
+    for tau in candidates:
+        results = [
+            _score_episode_rows(episode, episode_rows, policy, float(tau))
+            for episode, episode_rows in sorted(by_episode.items())
+        ]
+        metrics = aggregate_policy_results(
+            results, high_error_cutoff=high_error_cutoff
+        )
+        curve.append({"tau": float(tau), **metrics})
+    selected = choose_operating_point(curve, target_coverage=target_coverage)
+    return {
+        **selected,
+        "policy": policy,
+        "target_coverage": target_coverage,
+        "high_error_cutoff": high_error_cutoff,
+        "threshold_candidates": [float(value) for value in candidates],
+        "candidate_source_episodes": sorted(by_episode),
+        "curve": curve,
+    }
+
+
+def run_loeo(
+    rows: Sequence[Mapping[str, object]], policy: str
+) -> tuple[list[dict[str, object]], list[EpisodePolicyResult]]:
+    by_episode = _validate_policy_rows(rows)
+    expected_episodes = set(range(1064, 1080))
+    if set(by_episode) != expected_episodes:
+        raise ValueError("formal LOEO requires validation episodes 1064-1079")
+    folds = []
+    held_out_results = []
+    for held_out in sorted(by_episode):
+        training_rows = [
+            row
+            for episode, episode_rows in sorted(by_episode.items())
+            if episode != held_out
+            for row in episode_rows
+        ]
+        selected = select_threshold(training_rows, policy)
+        result = _score_episode_rows(
+            held_out, by_episode[held_out], policy, float(selected["tau"])
+        )
+        folds.append(
+            {
+                "held_out_episode": held_out,
+                "policy": policy,
+                "tau": selected["tau"],
+                "training_coverage": selected["coverage"],
+                "training_retained_rgb_mae": selected["retained_rgb_mae"],
+                "candidate_source_episodes": selected[
+                    "candidate_source_episodes"
+                ],
+                "threshold_candidates": selected["threshold_candidates"],
+            }
+        )
+        held_out_results.append(result)
+    return folds, held_out_results
+
+
+def evaluate_offline_gate(
+    adaptive: Mapping[str, float],
+    matched_fixed: Mapping[str, float],
+    episode_deltas: Sequence[float],
+) -> dict[str, bool]:
+    deltas = tuple(float(value) for value in episode_deltas)
+    checks = {
+        "coverage_at_least_0_80": float(adaptive["coverage"]) >= 0.80,
+        "retained_error_below_matched_fixed": float(
+            adaptive["retained_rgb_mae"]
+        )
+        < float(matched_fixed["retained_rgb_mae"]),
+        "episode_wins_at_least_9_of_16": len(deltas) == 16
+        and sum(value < 0.0 for value in deltas) >= 9,
+        "p90_not_worse_by_more_than_0_10": float(
+            adaptive["p90_episode_error"]
+        )
+        <= float(matched_fixed["p90_episode_error"]) + 0.10,
+    }
+    return {**checks, "passed": all(checks.values())}
