@@ -1045,6 +1045,40 @@ smoothed/hysteresis 的质量-覆盖率-成本曲线，不能靠少预测制造�
 
 独立报告：`docs/results/v100-official-055b-uncertainty-correlation.md`。
 
+### 阶段 U：Uncertainty-aware Adaptive Rollout 离线门禁
+
+#### 问题、设计与防泄漏
+
+相关性成立不等于策略有效。本阶段用冻结的官方 0.55B `K=4` validation 80 行数据，比较 fixed horizon、
+单阈值和 EMA + 连续两步阈值策略；目标是在 retained coverage 至少 0.80 时降低 RGB MAE。阈值严格用
+16-fold leave-one-episode-out 选择，留出 episode 不参与候选阈值或统计量；test 1080-1095 未访问。
+匹配 fixed baseline 在相邻 horizon 之间解析插值，避免通过少预测取得虚假低误差。触发 step 会实际生成、
+但不被信任，因此同时记录 retained 与 generated horizon。
+
+软件按 TDD 分四次提交：策略轨迹、分子优先计分、LOEO 门禁、离线评估器。相关测试为 `26 passed`；
+完整 CPU 回归基线在实施前为 `108 passed, 3 deselected`。正式评估代码提交 `6da0c14`，源归档 SHA 为
+`4fe4b2fb4b59dce77199b46fb82109a3d1197378ee6fd1a1b1df1dca2a354d86`。
+
+#### 正式结果与判断
+
+| policy | retained/generated coverage | retained/generated horizon | RGB MAE / matched fixed | wins | gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| threshold | 0.7750 / 0.8875 | 3.8750 / 4.4375 | 4.6512 / 4.8213 | 5/16 | fail |
+| EMA + hysteresis | **0.8125 / 0.9375** | **4.0625 / 4.6875** | **4.7402 / 4.9327** | **10/16** | **pass** |
+
+EMA + hysteresis 的 p90 为 5.9564，匹配 fixed 为 6.4492，四项预注册门禁全部通过；deployment threshold
+为 `0.020729146897792816`。单阈值因 LOEO coverage 只有 0.775 且仅赢 5/16 被拒绝。通过策略仍在
+1064、1066、1067、1070、1077、1078 六个 episodes 上失败，尤其 1078 仍是低 uncertainty / 高 error
+反例。独立脚本从 decisions CSV 与源 CSV 复算所有 numerator/count、coverage、matched fixed、wins、p90
+和 gate，与 JSON 在 `1e-12/1e-9` 容差内一致。
+
+generated coverage 0.9375 表示相对固定 `K=4,H=5` 的 sample-step 代理只节省 6.25%，不是 retained
+coverage 所暗示的 18.75%；相对 `K=1,H=5` 仍约贵 3.75 倍。`REQUEST_OBSERVATION` 当前只是 rollout
+信任边界，不代表机器人已真的重观测。结论是离线门禁授权进入在线提前停止实现，但方法尚未冻结，test
+继续密封。独立报告：`docs/results/v100-official-055b-adaptive-rollout-offline.md`。
+结果归档 SHA256 为 `7492b80ca0b14812e601a4aead8de0165d57c52c47b7a594c2e501e129c902c4`
+（40 KiB，不重复打包源视频、latent 或 checkpoint）。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -1061,6 +1095,8 @@ smoothed/hysteresis 的质量-覆盖率-成本曲线，不能靠少预测制造�
 12. **扩到 1064 episodes 只解决部分问题：** 动作胜率恢复官方水平，但 model/EMA 质量仍差于官方；下一变量应是 LR。
 13. **Phase 4 已冻结官方 0.55B：** LR `2e-6` 消除大部分遗忘但没有实际收益，停止 continued-training 搜索。
 14. **Phase 5 核心信号成立：** latent/RGB disagreement 均通过预注册 correlation gate，下一步设计 adaptive rollout。
+15. **Adaptive rollout 离线门禁通过：** EMA + 连续两步 latent 策略在 81.25% coverage 下优于匹配 fixed，
+    10/16 episodes 胜出；授权在线实现，但计算节省目前只有 6.25% 的解析代理。
 
 ## 5. 当前产物索引
 
@@ -1086,14 +1122,15 @@ smoothed/hysteresis 的质量-覆盖率-成本曲线，不能靠少预测制造�
 | Lower-LR 1k validation | `/data/miniworld/experiments/official-055b-expanded1064-lr2e6-1k-validation` |
 | Uncertainty GPU gate | `/data/miniworld/experiments/official-055b-uncertainty-gate-k2-v2` |
 | Formal uncertainty correlation | `/data/miniworld/experiments/official-055b-uncertainty-correlation-k4` |
+| Adaptive rollout offline | `/data/miniworld/experiments/official-055b-adaptive-rollout-offline` |
 | 0.12B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | Lower-LR 0.55B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/d59p17p7` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 5 的 uncertainty-error correlation 已通过；下一项设计并验证 uncertainty-aware
-adaptive rollout**。不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
+当前主线位置：**Phase 5 的 adaptive rollout 离线门禁已通过；下一项实现并验证在线 EMA + 连续两步
+提前停止**。不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
 
 ### P0：Phase 4 冻结结果
 
@@ -1104,8 +1141,9 @@ continued-training 选择已结束，官方 zero-shot 胜出，作为后续创�
 - expanded data 的 `LR=2e-6` 保守适配对照；
 - persistence、RGB MAE、训练成本、采样吞吐和显存。
 
-uncertainty 与未来预测误差的相关性已建立。下一项比较 fixed、threshold、smoothed/hysteresis，并输出
-质量-覆盖率-成本曲线。test split 继续保留到完整创新方法冻结后使用一次。
+uncertainty 与未来预测误差的相关性已建立，离线 fixed/threshold/smoothed-hysteresis 比较也已完成。
+下一项把通过的 smoothed/hysteresis 策略接入在线推理，验证它是否真正减少生成计算且保持离线语义。
+test split 继续保留到完整创新方法冻结后使用一次。
 
 ### P2：进入项目创新主线
 
