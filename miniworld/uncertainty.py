@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from itertools import combinations
 
+import numpy as np
 import torch
 
 
@@ -79,3 +80,86 @@ def rgb_memberwise_mae(
         ]
     )
     return per_member.mean(dim=0), per_member
+
+
+def _validate_vectors(*vectors: np.ndarray) -> tuple[np.ndarray, ...]:
+    arrays = tuple(np.asarray(vector, dtype=np.float64) for vector in vectors)
+    if not arrays or any(array.ndim != 1 for array in arrays):
+        raise ValueError("correlation inputs must be one-dimensional")
+    if len({len(array) for array in arrays}) != 1 or len(arrays[0]) < 2:
+        raise ValueError("correlation inputs must have equal length of at least two")
+    if any(not np.isfinite(array).all() for array in arrays):
+        raise ValueError("correlation inputs contain NaN or Inf")
+    return arrays
+
+
+def pearson_correlation(x: np.ndarray, y: np.ndarray) -> float | None:
+    """Return Pearson correlation, or ``None`` for a constant vector."""
+    x_array, y_array = _validate_vectors(x, y)
+    if np.ptp(x_array) == 0.0 or np.ptp(y_array) == 0.0:
+        return None
+    return float(np.corrcoef(x_array, y_array)[0, 1])
+
+
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty(len(values), dtype=np.float64)
+    start = 0
+    while start < len(values):
+        end = start + 1
+        while end < len(values) and values[order[end]] == values[order[start]]:
+            end += 1
+        ranks[order[start:end]] = 0.5 * (start + end - 1) + 1.0
+        start = end
+    return ranks
+
+
+def spearman_correlation(x: np.ndarray, y: np.ndarray) -> float | None:
+    """Return Spearman correlation with average ranks for ties."""
+    x_array, y_array = _validate_vectors(x, y)
+    return pearson_correlation(_average_ranks(x_array), _average_ranks(y_array))
+
+
+def horizon_conditioned_spearman(
+    x: np.ndarray,
+    y: np.ndarray,
+    horizons: np.ndarray,
+) -> float | None:
+    """Rank within each horizon before pooling and correlating the ranks."""
+    x_array, y_array, horizon_array = _validate_vectors(x, y, horizons)
+    x_ranks = np.empty_like(x_array)
+    y_ranks = np.empty_like(y_array)
+    for horizon in np.unique(horizon_array):
+        mask = horizon_array == horizon
+        x_ranks[mask] = _average_ranks(x_array[mask])
+        y_ranks[mask] = _average_ranks(y_array[mask])
+    return pearson_correlation(x_ranks, y_ranks)
+
+
+def equal_count_bins(
+    uncertainty: np.ndarray,
+    error: np.ndarray,
+    bins: int = 4,
+) -> list[dict[str, float | int]]:
+    """Sort by uncertainty and summarize stable, exhaustive equal-count bins."""
+    uncertainty_array, error_array = _validate_vectors(uncertainty, error)
+    if bins <= 0 or bins > len(uncertainty_array):
+        raise ValueError("bins must be between one and the observation count")
+    order = np.argsort(uncertainty_array, kind="mergesort")
+    summaries = []
+    for bin_index, indices in enumerate(np.array_split(order, bins), start=1):
+        bin_uncertainty = uncertainty_array[indices]
+        bin_error = error_array[indices]
+        summaries.append(
+            {
+                "bin": bin_index,
+                "count": int(len(indices)),
+                "mean_uncertainty": float(bin_uncertainty.mean()),
+                "min_uncertainty": float(bin_uncertainty.min()),
+                "max_uncertainty": float(bin_uncertainty.max()),
+                "mean_error": float(bin_error.mean()),
+                "min_error": float(bin_error.min()),
+                "max_error": float(bin_error.max()),
+            }
+        )
+    return summaries
