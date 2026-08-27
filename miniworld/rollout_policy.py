@@ -316,7 +316,14 @@ def aggregate_policy_results(
         "generated_coverage": generated_count / total_steps,
         "mean_retained_horizon": retained_count / len(results),
         "mean_generated_horizon": generated_count / len(results),
+        "median_episode_error": float(np.median(episode_errors)),
         "p90_episode_error": float(np.percentile(episode_errors, 90)),
+        "worst_episode_error": float(max(episode_errors)),
+        "request_rate": sum(
+            result.trace.requested_observation_at is not None for result in results
+        )
+        / len(results),
+        "avoided_completed_future_steps": total_steps - generated_count,
         "high_error_retained_fraction": sum(
             value >= high_error_cutoff for value in retained_values
         )
@@ -435,12 +442,29 @@ def _score_episode_rows(
     rows: Sequence[Mapping[str, object]],
     policy: str,
     tau: float,
+    *,
+    execution: str = "frame",
+    layout: ChunkLayout | None = None,
 ) -> EpisodePolicyResult:
     uncertainty = [float(row["uncertainty_latent"]) for row in rows]
-    if policy == "threshold":
+    if execution == "frame" and layout is not None:
+        raise ValueError("layout is only valid for chunk execution")
+    if execution == "chunk" and layout is None:
+        raise ValueError("chunk execution requires a layout")
+    if execution not in ("frame", "chunk"):
+        raise ValueError(f"unknown execution mode: {execution}")
+    if execution == "frame" and policy == "threshold":
         trace = threshold_policy(uncertainty, tau)
-    elif policy == "smoothed_hysteretic":
+    elif execution == "frame" and policy == "smoothed_hysteretic":
         trace = smoothed_hysteretic_policy(uncertainty, tau)
+    elif execution == "chunk" and policy == "threshold":
+        assert layout is not None
+        trace = chunk_aligned_threshold_policy(uncertainty, tau, layout=layout)
+    elif execution == "chunk" and policy == "smoothed_hysteretic":
+        assert layout is not None
+        trace = chunk_aligned_smoothed_hysteretic_policy(
+            uncertainty, tau, layout=layout
+        )
     else:
         raise ValueError(f"unknown policy: {policy}")
     step_errors = [float(row["error_rgb"]) for row in rows]
@@ -459,7 +483,15 @@ def select_threshold(
     policy: str,
     *,
     target_coverage: float = 0.80,
+    execution: str = "frame",
+    layout: ChunkLayout | None = None,
 ) -> dict[str, object]:
+    if execution == "frame" and layout is not None:
+        raise ValueError("layout is only valid for chunk execution")
+    if execution == "chunk" and layout is None:
+        raise ValueError("chunk execution requires a layout")
+    if execution not in ("frame", "chunk"):
+        raise ValueError(f"unknown execution mode: {execution}")
     by_episode = _validate_policy_rows(training_rows)
     uncertainties = [
         float(row["uncertainty_latent"])
@@ -476,7 +508,14 @@ def select_threshold(
     curve = []
     for tau in candidates:
         results = [
-            _score_episode_rows(episode, episode_rows, policy, float(tau))
+            _score_episode_rows(
+                episode,
+                episode_rows,
+                policy,
+                float(tau),
+                execution=execution,
+                layout=layout,
+            )
             for episode, episode_rows in sorted(by_episode.items())
         ]
         metrics = aggregate_policy_results(
@@ -487,6 +526,12 @@ def select_threshold(
     return {
         **selected,
         "policy": policy,
+        "execution": execution,
+        "history_len": layout.history_len if layout is not None else None,
+        "chunk_size": layout.chunk_size if layout is not None else None,
+        "completion_boundaries": list(layout.completion_boundaries)
+        if layout is not None
+        else None,
         "target_coverage": target_coverage,
         "high_error_cutoff": high_error_cutoff,
         "threshold_candidates": [float(value) for value in candidates],
@@ -496,7 +541,11 @@ def select_threshold(
 
 
 def run_loeo(
-    rows: Sequence[Mapping[str, object]], policy: str
+    rows: Sequence[Mapping[str, object]],
+    policy: str,
+    *,
+    execution: str = "frame",
+    layout: ChunkLayout | None = None,
 ) -> tuple[list[dict[str, object]], list[EpisodePolicyResult]]:
     by_episode = _validate_policy_rows(rows)
     expected_episodes = set(range(1064, 1080))
@@ -511,14 +560,25 @@ def run_loeo(
             if episode != held_out
             for row in episode_rows
         ]
-        selected = select_threshold(training_rows, policy)
+        selected = select_threshold(
+            training_rows, policy, execution=execution, layout=layout
+        )
         result = _score_episode_rows(
-            held_out, by_episode[held_out], policy, float(selected["tau"])
+            held_out,
+            by_episode[held_out],
+            policy,
+            float(selected["tau"]),
+            execution=execution,
+            layout=layout,
         )
         folds.append(
             {
                 "held_out_episode": held_out,
                 "policy": policy,
+                "execution": execution,
+                "history_len": selected["history_len"],
+                "chunk_size": selected["chunk_size"],
+                "completion_boundaries": selected["completion_boundaries"],
                 "tau": selected["tau"],
                 "training_coverage": selected["coverage"],
                 "training_retained_rgb_mae": selected["retained_rgb_mae"],
@@ -552,3 +612,18 @@ def evaluate_offline_gate(
         <= float(matched_fixed["p90_episode_error"]) + 0.10,
     }
     return {**checks, "passed": all(checks.values())}
+
+
+def evaluate_chunk_aligned_gate(
+    adaptive: Mapping[str, float],
+    matched_fixed: Mapping[str, float],
+    episode_deltas: Sequence[float],
+) -> dict[str, bool]:
+    quality = evaluate_offline_gate(adaptive, matched_fixed, episode_deltas)
+    completed_cost_passed = float(adaptive["generated_coverage"]) < 1.0
+    return {
+        **{key: value for key, value in quality.items() if key != "passed"},
+        "quality_gate_passed": quality["passed"],
+        "completed_generated_coverage_below_1_00": completed_cost_passed,
+        "passed": quality["passed"] and completed_cost_passed,
+    }

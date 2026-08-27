@@ -10,6 +10,7 @@ from miniworld.rollout_policy import (
     chunk_aligned_threshold_policy,
     choose_operating_point,
     evaluate_offline_gate,
+    evaluate_chunk_aligned_gate,
     fixed_policy,
     matched_fixed_baseline,
     run_loeo,
@@ -17,6 +18,7 @@ from miniworld.rollout_policy import (
     smoothed_hysteretic_policy,
     threshold_policy,
     threshold_candidates,
+    select_threshold,
 )
 
 
@@ -215,3 +217,105 @@ def test_chunk_policy_rejects_uncertainty_length_different_from_layout():
 
     with pytest.raises(ValueError, match="future_horizon"):
         chunk_aligned_threshold_policy([0.1] * 4, tau=0.5, layout=layout)
+
+
+def _literal_chunk_loeo_rows():
+    rows = []
+    for episode in range(1064, 1080):
+        high_early_uncertainty = episode < 1068
+        uncertainty = [0.0, 1.0, 1.0, 1.0, 1.0] if high_early_uncertainty else [0.0] * 5
+        errors = [1.0, 10.0, 10.0, 10.0, 10.0] if high_early_uncertainty else [2.0] * 5
+        for step in range(1, 6):
+            rows.append(
+                {
+                    "episode": episode,
+                    "future_latent_step": step,
+                    "uncertainty_latent": uncertainty[step - 1],
+                    "error_rgb": errors[step - 1],
+                    **{
+                        f"error_seed_{seed}": errors[step - 1]
+                        for seed in range(4)
+                    },
+                }
+            )
+    return rows
+
+
+def _literal_training_rows():
+    return [
+        {
+            "episode": episode,
+            "future_latent_step": step,
+            "uncertainty_latent": episode * 0.001 + step * 0.01,
+            "error_rgb": float(step),
+            **{f"error_seed_{seed}": float(step) for seed in range(4)},
+        }
+        for episode in range(1064, 1079)
+        for step in range(1, 6)
+    ]
+
+
+def test_chunk_execution_scores_completed_boundary_not_trigger_step():
+    layout = build_chunk_layout(history_len=1, future_horizon=5, chunk_size=2)
+
+    folds, results = run_loeo(
+        _literal_chunk_loeo_rows(),
+        "smoothed_hysteretic",
+        execution="chunk",
+        layout=layout,
+    )
+
+    assert {fold["execution"] for fold in folds} == {"chunk"}
+    assert {tuple(fold["completion_boundaries"]) for fold in folds} == {(1, 3, 5)}
+    assert all(result.trace.generated_horizon in (1, 3, 5) for result in results)
+    assert any(
+        result.trace.requested_observation_at == 3
+        and result.trace.generated_horizon == 3
+        and result.trace.retained_horizon == 1
+        for result in results
+    )
+
+
+def test_frame_execution_remains_the_default():
+    selected = select_threshold(_literal_training_rows(), "threshold")
+    explicit = select_threshold(
+        _literal_training_rows(), "threshold", execution="frame"
+    )
+
+    assert selected["tau"] == explicit["tau"]
+    assert selected["coverage"] == explicit["coverage"]
+
+
+def test_chunk_gate_rejects_quality_pass_without_avoided_complete_chunk():
+    adaptive = {
+        "coverage": 0.8,
+        "generated_coverage": 1.0,
+        "retained_rgb_mae": 4.0,
+        "p90_episode_error": 6.0,
+    }
+    fixed = {"retained_rgb_mae": 4.1, "p90_episode_error": 6.05}
+
+    gate = evaluate_chunk_aligned_gate(
+        adaptive, fixed, [-0.1] * 9 + [0.1] * 7
+    )
+
+    assert gate["quality_gate_passed"] is True
+    assert gate["completed_generated_coverage_below_1_00"] is False
+    assert gate["passed"] is False
+
+
+def test_chunk_gate_passes_when_quality_and_cost_both_pass():
+    adaptive = {
+        "coverage": 0.8,
+        "generated_coverage": 0.9,
+        "retained_rgb_mae": 4.0,
+        "p90_episode_error": 6.0,
+    }
+    fixed = {"retained_rgb_mae": 4.1, "p90_episode_error": 6.05}
+
+    gate = evaluate_chunk_aligned_gate(
+        adaptive, fixed, [-0.1] * 9 + [0.1] * 7
+    )
+
+    assert gate["completed_generated_coverage_below_1_00"] is True
+    assert gate["passed"] is True
