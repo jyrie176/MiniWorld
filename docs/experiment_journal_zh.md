@@ -1127,6 +1127,23 @@ LOEO 只从其余 15 episodes 的 uncertainty 选择；oracle 只作不可部署
 提供输出信任边界，不是模型精度提升、在线加速或闭环控制收益。独立报告：
 `docs/results/v100-official-055b-selective-prediction.md`。
 
+### 阶段 X：K=1/2/4 成本—可靠性消融
+
+复用阶段 W 已保存的四个 seed 视频、latent 与误差，不重新采样。K=2 穷举全部六个 seed pair，
+K=4 从原始产物重建并与冻结 CSV 在 `1e-5` 内对齐；K=1 没有 disagreement，只作 1x 成本下界。
+源日志不含可靠起止时间，所以成本只按实际 rollout 次数 `1x/2x/4x` 计，不报告 wall-time。
+
+| K | cost | AURC | LOEO-80 mean | LOEO-80 worst |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1x | n/a | 5.4804（100%） | n/a |
+| 2 | 2x | **3.9087** | **4.6958** | 7.7536 |
+| 4 | 4x | **3.8979** | 4.7158 | **7.5638** |
+
+K=2 六对 AURC 范围 `3.8939-3.9202`，没有 pair cherry-picking。它用 K=4 一半 rollout 数保留几乎
+全部排序能力；K=4 的优势主要是 worst MAE 再降 `0.190`。因此冻结 K=2 + RGB disagreement +
+LOEO 80% target coverage 为成本敏感候选，K=4 为尾部风险优先配置。独立报告：
+`docs/results/v100-official-055b-selective-k-ablation.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -1149,6 +1166,8 @@ LOEO 只从其余 15 episodes 的 uncertainty 选择；oracle 只作不可部署
     不进入在线 early-stopping。
 17. **选择性预测信号成立：** RGB disagreement 的 AURC `3.8979`，优于 random `5.4804` 并接近
     oracle `3.8187`；LOEO 80% coverage 将 mean/worst MAE 分别降低 `13.95%/46.19%`。
+18. **K=2 是成本敏感折中：** 六 pair 平均 AURC `3.9087`，接近 K=4 的 `3.8979`，只需一半 rollout；
+    K=4 仍有更低的 worst MAE。
 
 ## 5. 当前产物索引
 
@@ -1177,15 +1196,16 @@ LOEO 只从其余 15 episodes 的 uncertainty 选择；oracle 只作不可部署
 | Adaptive rollout offline | `/data/miniworld/experiments/official-055b-adaptive-rollout-offline` |
 | Chunk-aligned adaptive rollout | `/data/miniworld/experiments/official-055b-adaptive-rollout-chunk-aligned` |
 | Selective prediction | `/data/miniworld/experiments/official-055b-selective-prediction` |
+| Selective K ablation | `/data/miniworld/experiments/official-055b-selective-k-ablation` |
 | 0.12B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | Lower-LR 0.55B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/d59p17p7` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 5 的在线 early-stopping 已停止，但 uncertainty reliability gating 已得到正结果。**
-下一项优先做 K=1/2/4 的成本—可靠性消融；只有先冻结信号、K 和 coverage，才允许对密封 test 做一次
-最终确认。不继续增加 0.12B 或 continued-training 步数。
+当前主线位置：**Phase 5 reliability gating 已得到正结果，并冻结 K=2 + RGB disagreement + LOEO 80%
+作为成本敏感候选。** 下一项优先做 OOD stress test；只有方法与 OOD 口径冻结后，才允许对密封 test
+做一次最终确认。不继续增加 0.12B 或 continued-training 步数。
 
 ### P0：Phase 4 冻结结果
 
