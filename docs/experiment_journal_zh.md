@@ -2,18 +2,89 @@
 
 最后更新：2026-08-27
 
-## 1. 项目目标
+## 1. 项目总目标与主线
 
-在单张 Tesla V100-SXM2-32GB 上建立一条可重复运行的 MiniWorld DROID
-最小训练与评估路径，并回答以下问题：
+基于 MiniWorld 上游代码和公开权重，在 **4×Tesla V100-SXM2-32GB** 环境建立完整、可复现的
+世界模型训练与评测体系，并围绕“**不确定性感知的自适应 rollout**”形成有实验支撑的项目贡献。
 
-1. V100 不支持 FlashAttention-2 和 BF16 时，能否使用 PyTorch SDPA 与 FP16
-   完成训练和推理？
-2. 模型能否在小规模 DROID 数据上学会视频动力学？
-3. 模型是否真正使用机器人动作，而不只是从第一帧生成看似合理的视频？
-4. 普通训练权重与 EMA 权重分别适合什么用途？
+V100/FP16 兼容改造是工程基础，0.12B 训练是 sanity 阶段；两者都不是项目终点。完整主线为：
 
-本轮不是论文规模复现。当前目标是先打通可靠的 MVP，再通过受控实验定位主要瓶颈。
+```text
+V100 工程适配
+    ↓
+0.12B from-scratch sanity
+    ↓
+0.55B 公开预训练权重 continued training / domain adaptation
+    ↓
+不确定性估计与 uncertainty-error correlation
+    ↓
+adaptive rollout 核心创新
+    ↓
+horizon / threshold / K / OOD / 资源消融
+    ↓
+技术报告、可复现仓库与求职材料
+```
+
+项目最低成功标准：
+
+1. 0.12B sanity 可复现，训练、评测、DDP 和 checkpoint 链路可靠；
+2. 0.55B continued-training baseline 稳定，并与 pretrained zero-shot 公平比较；
+3. 完成 uncertainty 与未来误差的相关性分析；
+4. 完成 fixed horizon、单阈值和带平滑/迟滞 adaptive horizon 的消融；
+5. 所有结论均可追溯到代码、配置、数据 manifest、run ID、checkpoint 和机器可读指标。
+
+### 1.1 模型阶段
+
+#### 0.12B（代码配置名 `B`）：学习与正确性验证
+
+用途是 from-scratch sanity，不追求最终质量或 SOTA。它负责验证数据/动作对齐、损失、FP16、
+attention、EMA、checkpoint、DDP、短 rollout 和评测方法。当前 64-episode、5k-step 训练属于这一阶段。
+
+离开 0.12B 阶段前需要形成明确验收结论，但不得在小模型上无限追加训练，延误正式主线。
+
+#### 0.55B（代码配置名 `0.5B`）：正式实验主模型
+
+使用 MiniWorld 上游公开的 0.55B DROID checkpoint 做 continued training / domain adaptation，
+不从头训练。必须先建立 zero-shot 固定评测，再进行继续训练；核心 adaptive rollout、OOD 和消融
+均以此模型为主。
+
+#### 1B：可选 stretch
+
+只有在 0.55B baseline、adaptive rollout 和主要消融全部完成后才考虑。3B 不在项目范围内。
+
+### 1.2 核心创新：不确定性感知的自适应 Rollout
+
+固定 rollout horizon 会在高不确定区域继续积累误差。核心研究问题是：能否通过同一上下文的
+`K` 次随机预测，使用 latent variance、特征 pairwise disagreement 等指标得到逐步不确定性 `u_t`，
+并在 `u_t` 超过验证集选择的阈值 `τ` 时提前停止、缩短 horizon，或触发重新观测/重规划。
+
+至少比较：
+
+- fixed horizon；
+- 单步阈值 adaptive horizon；
+- 带平滑/迟滞的 adaptive horizon。
+
+必须报告 uncertainty-error Pearson/Spearman、分桶误差、平均 horizon、覆盖率、提前停止率、
+预测质量和额外推理成本。阈值只允许在 validation set 上选择，test set 只做最终报告。
+
+### 1.3 任务前主线检查（强制）
+
+开始任何开发、训练、下载或评估任务前，先回答：
+
+1. 该任务属于哪一阶段：V100 基础、0.12B sanity、0.55B baseline、adaptive rollout、消融/OOD，
+   还是最终报告？
+2. 它要回答哪个明确问题，满足哪个验收标准？
+3. 当前阶段是否存在优先级更高、尚未完成的 gate？
+4. 产物如何支持 0.55B baseline 或 adaptive rollout，而不只是让当前视频“看起来更好”？
+5. 如果无法映射到主线，是否应停止；若确需偏离，是否已明确记录原因、成本和返回主线的条件？
+
+每项新实验在记录中增加一行：
+
+```text
+主线映射：Phase / 实验编号 / 对应验收项
+```
+
+未经这项检查，不启动新的长训练、大规模下载、模型扩展或旁支功能。
 
 ## 2. 硬件约束与技术选择
 
@@ -458,6 +529,9 @@ x_pred = z + t * v_pred
 
 ## 6. 下一步实验队列
 
+当前主线位置：**Phase 3，0.12B from-scratch sanity 收尾**。以下 P0 项用于关闭 Phase 3 gate，
+完成后进入 0.55B continued-training baseline；不继续无目的地增加 0.12B 训练步数。
+
 ### P0：重新验证正确 recon
 
 使用最终 5k checkpoint，在固定样本上分别测试 `t=0.1/0.3/0.5/0.7/0.9` 的单步重建，确认：
@@ -477,12 +551,45 @@ x_pred = z + t * v_pred
 报告平均 MAE、中位数、逐 episode real 胜率和代表性视频。只有 real 在多数 episode 上优于两个对照，
 才能初步认为动作条件学习有效。
 
-### P1：根据评估结果选择训练方向
+### P0：固定 validation split 与 0.12B 验收
 
-- real 稳定获胜：扩大数据量与训练步数。
+建立按 episode 隔离、可审计的 validation/test manifest，不再仅使用训练 episode 判断泛化。汇总：
+
+- train 与 validation 的短 horizon 指标；
+- checkpoint 选择规则；
+- 普通权重与 EMA；
+- 动作消融；
+- 成功、失败和高误差样例。
+
+主线映射：Phase 3 / E1 / “0.12B sanity 可复现并有可检查短 rollout”。
+
+### P0：双卡 DDP 与资源基线
+
+在等效 global batch 下比较单卡和双卡短程 loss 趋势，验证 sampler 分片、梯度同步、checkpoint
+恢复、每卡显存和吞吐。通过后才允许把 0.55B 正式训练迁移到 2–3 卡。
+
+主线映射：Phase 3 / E3、E8 / “双卡无 hang、无数据重复错误，训练与恢复稳定”。
+
+### P1：进入 0.55B continued-training baseline
+
+Phase 3 验收完成后：
+
+1. 下载并校验 MiniWorld 上游 0.55B DROID checkpoint；
+2. 在固定 validation/test manifest 上运行 pretrained zero-shot baseline；
+3. 设计短时序 continued-training 小实验，先验证权重严格加载和 FP16/DDP 稳定性；
+4. 相对 zero-shot 比较质量、显存、吞吐和成本，再决定正式训练预算。
+
+主线映射：Phase 4 / E2 / “0.55B baseline 稳定且相对 zero-shot 有可解释变化”。
+
+### P1：根据 0.12B 评估结果选择诊断方向
+
+- real 稳定获胜：关闭动作条件 sanity 项，按计划进入 0.55B baseline，而不是继续堆叠 0.12B 步数。
 - real 与 shuffle 接近：优先核对动作和视频时间对齐，并调整动作条件训练/CFG。
 - recon 好、gen 差：处理多步误差累积和流式 rollout 设置。
 - recon 本身差：继续优化 denoiser 训练，而不是先增加 rollout 长度。
+
+这些诊断只用于关闭 0.12B sanity gate；除非发现会阻塞 0.55B 的正确性问题，否则不扩展为新的
+小模型长期训练支线。
 
 ## 7. 后续记录规范
 
