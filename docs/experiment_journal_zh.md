@@ -1144,6 +1144,25 @@ K=2 六对 AURC 范围 `3.8939-3.9202`，没有 pair cherry-picking。它用 K=4
 LOEO 80% target coverage 为成本敏感候选，K=4 为尾部风险优先配置。独立报告：
 `docs/results/v100-official-055b-selective-k-ablation.md`。
 
+### 阶段 Y：选择性预测受控扰动压力测试
+
+冻结 K=2 + RGB disagreement + LOEO 80%，继续用 validation 1064-1079 与全部六个 seed pair。
+对两个成员分别施加确定性独立噪声 `σ=8/16`，或同时施加相同亮度偏移 `+16/+32`。这是 output
+corruption stress，不称为真实 OOD；test 仍密封。clean 重建 AURC 与阶段 X 在 `1e-5` 内一致。
+
+| condition | uncertainty / clean | full error Δ | AURC gain vs random | LOEO-80 reduction |
+| --- | ---: | ---: | ---: | ---: |
+| clean | 1.0000 | +0.0000 | 1.5717 | 0.7847 |
+| common brightness +16 | 0.9797 | +9.2076 | 0.3775 | 0.2647 |
+| common brightness +32 | 0.9604 | +24.0177 | 0.1456 | 0.1258 |
+| independent noise σ=8 | 3.0763 | +3.2788 | 1.0328 | 0.6004 |
+| independent noise σ=16 | 5.5364 | +8.4527 | 0.7201 | 0.4886 |
+
+独立扰动使 disagreement 明显响应并保留部分排序能力；共模偏移让真实误差剧增，但 disagreement 不升
+反降，证明 sampling disagreement 只能发现成员间不一致，不能发现 ensemble 一致犯错。该负面边界
+要求未来部署叠加独立输入漂移或感知质量信号。独立报告：
+`docs/results/v100-official-055b-selective-stress.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -1168,6 +1187,8 @@ LOEO 80% target coverage 为成本敏感候选，K=4 为尾部风险优先配置
     oracle `3.8187`；LOEO 80% coverage 将 mean/worst MAE 分别降低 `13.95%/46.19%`。
 18. **K=2 是成本敏感折中：** 六 pair 平均 AURC `3.9087`，接近 K=4 的 `3.8979`，只需一半 rollout；
     K=4 仍有更低的 worst MAE。
+19. **Reliability 的盲区已定位：** 独立噪声使 disagreement 响应 `3.08x/5.54x`，共模亮度偏移使误差
+    剧增却不提高 disagreement；该方法不是完整 OOD detector。
 
 ## 5. 当前产物索引
 
@@ -1197,15 +1218,16 @@ LOEO 80% target coverage 为成本敏感候选，K=4 为尾部风险优先配置
 | Chunk-aligned adaptive rollout | `/data/miniworld/experiments/official-055b-adaptive-rollout-chunk-aligned` |
 | Selective prediction | `/data/miniworld/experiments/official-055b-selective-prediction` |
 | Selective K ablation | `/data/miniworld/experiments/official-055b-selective-k-ablation` |
+| Controlled corruption stress | `/data/miniworld/experiments/official-055b-selective-stress` |
 | 0.12B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | Lower-LR 0.55B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/d59p17p7` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 5 reliability gating 已得到正结果，并冻结 K=2 + RGB disagreement + LOEO 80%
-作为成本敏感候选。** 下一项优先做 OOD stress test；只有方法与 OOD 口径冻结后，才允许对密封 test
-做一次最终确认。不继续增加 0.12B 或 continued-training 步数。
+当前主线位置：**Phase 5 reliability gating 与受控 stress 已完成。K=2 能检测成员间不一致，但存在
+共模错误盲区。** 下一项应做方法冻结评审：决定是增加第二个独立漂移信号，还是保留该限制并对密封
+test 做唯一一次最终确认。不继续增加 0.12B 或 continued-training 步数。
 
 ### P0：Phase 4 冻结结果
 
