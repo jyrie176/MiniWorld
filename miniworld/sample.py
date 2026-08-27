@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -56,6 +58,89 @@ def write_video(path: str, frames: torch.Tensor, fps: int) -> None:
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+def save_sample_latents(
+    root: Path, index: int, latents: torch.Tensor
+) -> Path:
+    """Persist one generated latent tensor without retaining GPU state."""
+    path = root / "latents" / f"sample_{index:04d}.pt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(latents.detach().cpu(), path)
+    return path
+
+
+def sha256_file(
+    path: str | os.PathLike[str], chunk_bytes: int = 8 * 1024 * 1024
+) -> str:
+    """Hash a file incrementally to avoid checkpoint-sized allocations."""
+    if chunk_bytes <= 0:
+        raise ValueError("chunk_bytes must be positive")
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(chunk_bytes):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_sampling_manifest(
+    args: argparse.Namespace,
+    samples: list[dict[str, object]],
+    identities: dict[str, str],
+) -> dict[str, object]:
+    """Build the reproducibility record for an exported latent ensemble member."""
+    sampling_keys = (
+        "total_len",
+        "history_len",
+        "df_chunk_size",
+        "df_ardiff_step",
+        "num_sampling_steps",
+        "cfg_scale",
+        "cfg_interval_min",
+        "cfg_interval_max",
+        "stream_inflight_chunks",
+        "stream_max_cache_chunks",
+        "stream_sink_size",
+        "precision",
+        "attention_backend",
+        "resize_h",
+        "resize_w",
+    )
+    return {
+        "schema_version": 1,
+        "dataset": args.dataset,
+        "data_root": args.data_root,
+        "data_manifest_sha256": identities["data_manifest_sha256"],
+        "episodes": [int(sample["episode"]) for sample in samples],
+        "checkpoint": args.checkpoint,
+        "checkpoint_sha256": identities["checkpoint_sha256"],
+        "weights_source": args.weights_source,
+        "wm_model": args.wm_model,
+        "seed": int(args.seed),
+        "action_variant": args.action_variant,
+        "git_commit": identities["git_commit"],
+        "sampling": {key: getattr(args, key) for key in sampling_keys},
+        "samples": samples,
+    }
+
+
+def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
 
 def build_dataset(args: argparse.Namespace):
@@ -277,6 +362,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vae_checkpoint", required=True)
     parser.add_argument("--sample_dir", default="samples")
     parser.add_argument("--sample_num_videos", type=int, default=8)
+    parser.add_argument(
+        "--save_latents",
+        action="store_true",
+        help="Save final generated latent tensors and a reproducibility manifest.",
+    )
 
     parser.add_argument(
         "--wm_model",
@@ -428,6 +518,7 @@ def main() -> None:
     pred_root = sample_root / "pred"
     pred_root.mkdir(parents=True, exist_ok=True)
     timing_rows = []
+    latent_samples = []
 
     for idx, batch in enumerate(dataloader):
         if idx >= args.sample_num_videos:
@@ -489,6 +580,17 @@ def main() -> None:
         if not args.benchmark_no_save:
             video = ((pred_rgb[0].permute(1, 2, 3, 0).clamp(-1, 1) + 1.0) * 127.5).to(torch.uint8)
             write_video(os.fspath(pred_root / f"sample_{idx:04d}.mp4"), video, fps=args.save_fps)
+            if args.save_latents:
+                save_sample_latents(sample_root, idx, pred_latents)
+                episode = int(dataset.samples[idx]) if not use_custom_re10k else idx
+                latent_samples.append(
+                    {
+                        "sample_index": idx,
+                        "episode": episode,
+                        "latent_shape": list(pred_latents.shape),
+                        "latent_dtype": str(pred_latents.dtype),
+                    }
+                )
             print0(f"[Sample] wrote sample_{idx:04d}.mp4")
 
     if timing_rows:
@@ -497,6 +599,23 @@ def main() -> None:
             for row in timing_rows:
                 fp.write(json.dumps(row) + "\n")
         print0(f"[Benchmark] wrote {timing_path}")
+
+    if args.save_latents and not args.benchmark_no_save:
+        data_manifest = Path(args.data_root) / "meta" / "episodes.jsonl"
+        if not data_manifest.is_file():
+            raise FileNotFoundError(f"dataset manifest not found: {data_manifest}")
+        manifest = build_sampling_manifest(
+            args,
+            latent_samples,
+            {
+                "checkpoint_sha256": sha256_file(args.checkpoint),
+                "data_manifest_sha256": sha256_file(data_manifest),
+                "git_commit": _git_commit(),
+            },
+        )
+        manifest_path = sample_root / "sampling_manifest.json"
+        _write_json_atomic(manifest_path, manifest)
+        print0(f"[Sample] wrote {manifest_path}")
 
 
 if __name__ == "__main__":

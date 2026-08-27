@@ -9,8 +9,11 @@ from miniworld.train import (
 )
 from miniworld.sample import (
     apply_action_variant,
+    build_sampling_manifest,
     build_parser as build_sample_parser,
     read_checkpoint,
+    save_sample_latents,
+    sha256_file,
 )
 
 
@@ -120,6 +123,86 @@ def test_sampling_parser_accepts_reproducible_action_controls():
 
     assert args.seed == 123
     assert args.action_variant == "shuffle"
+
+
+def test_sampling_parser_accepts_opt_in_latent_export():
+    default_args = build_sample_parser().parse_args(_required_sample_args())
+    export_args = build_sample_parser().parse_args(
+        _required_sample_args() + ["--save_latents"]
+    )
+
+    assert default_args.save_latents is False
+    assert export_args.save_latents is True
+
+
+def test_save_sample_latents_uses_cpu_tensor_and_stable_name(tmp_path):
+    value = torch.ones(1, 2, 3, 4, 5)
+
+    path = save_sample_latents(tmp_path, 7, value)
+
+    assert path == tmp_path / "latents" / "sample_0007.pt"
+    saved = torch.load(path, map_location="cpu", weights_only=True)
+    assert saved.device.type == "cpu"
+    torch.testing.assert_close(saved, value)
+
+
+def test_sha256_file_streams_known_content(tmp_path):
+    source = tmp_path / "identity.txt"
+    source.write_bytes(b"miniworld")
+
+    assert sha256_file(source, chunk_bytes=3) == (
+        "e7958ccf08f91e1e4ab027d9eccf32f56bc21f7b3263507c7e6eb09a7780ce0e"
+    )
+
+
+def test_build_sampling_manifest_records_reproducibility_identity():
+    args = build_sample_parser().parse_args(
+        _required_sample_args()
+        + [
+            "--data_root",
+            "/validation",
+            "--seed",
+            "123",
+            "--action_variant",
+            "real",
+            "--total_len",
+            "6",
+            "--precision",
+            "fp16",
+            "--attention_backend",
+            "sdpa",
+            "--save_latents",
+        ]
+    )
+    samples = [
+        {
+            "sample_index": 0,
+            "episode": 1064,
+            "latent_shape": [1, 48, 6, 15, 20],
+            "latent_dtype": "torch.float16",
+        }
+    ]
+
+    manifest = build_sampling_manifest(
+        args,
+        samples,
+        {
+            "checkpoint_sha256": "checkpoint-hash",
+            "data_manifest_sha256": "data-hash",
+            "git_commit": "commit-id",
+        },
+    )
+
+    assert manifest["seed"] == 123
+    assert manifest["checkpoint"] == "/model.pt"
+    assert manifest["checkpoint_sha256"] == "checkpoint-hash"
+    assert manifest["data_manifest_sha256"] == "data-hash"
+    assert manifest["git_commit"] == "commit-id"
+    assert manifest["episodes"] == [1064]
+    assert manifest["samples"] == samples
+    assert manifest["sampling"]["total_len"] == 6
+    assert manifest["sampling"]["precision"] == "fp16"
+    assert manifest["sampling"]["attention_backend"] == "sdpa"
 
 
 @pytest.mark.parametrize("source", ["ema", "model"])
