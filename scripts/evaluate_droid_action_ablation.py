@@ -84,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample_root", required=True)
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--seed_base", type=int, default=20260827)
+    parser.add_argument(
+        "--checkpoint_label",
+        default="official MiniWorld 0.55B DROID bare state dict",
+    )
     return parser
 
 
@@ -135,7 +139,7 @@ def main() -> None:
         "split": "validation",
         "episodes": [int(rows[0]["episode"]), int(rows[-1]["episode"])],
         "count": len(rows),
-        "checkpoint": "official MiniWorld 0.55B DROID bare state dict",
+        "checkpoint": args.checkpoint_label,
         "seed_base": args.seed_base,
         "future_frames": 20,
         "rgb_scale": "0-255",

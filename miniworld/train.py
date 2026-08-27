@@ -150,13 +150,16 @@ def load_pretrained(
     """Load a MiniWorld checkpoint, allowing shape changes between curriculum stages."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     model_state = model.state_dict()
-    raw_model = ckpt.get("model", ckpt.get("ema_model", {}))
+    bare_state_dict = bool(ckpt) and all(
+        isinstance(key, str) and torch.is_tensor(value) for key, value in ckpt.items()
+    )
+    raw_model = ckpt if bare_state_dict else ckpt.get("model", ckpt.get("ema_model", {}))
     filtered = {k: v for k, v in raw_model.items() if k in model_state and model_state[k].shape == v.shape}
     info = model.load_state_dict(filtered, strict=False)
     print0(f"[Checkpoint] loaded model from {path}: {info}")
 
     ema_state = ema_model.state_dict()
-    raw_ema = ckpt.get("ema_model", raw_model)
+    raw_ema = raw_model if bare_state_dict else ckpt.get("ema_model", raw_model)
     filtered_ema = {k: v for k, v in raw_ema.items() if k in ema_state and ema_state[k].shape == v.shape}
     ema_model.load_state_dict(filtered_ema, strict=False)
     if optimizer is not None and "optimizer" in ckpt:

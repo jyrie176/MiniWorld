@@ -1,6 +1,6 @@
 import torch
 
-from scripts.evaluate_droid_action_ablation import compute_episode_metrics
+from scripts.evaluate_droid_action_ablation import build_parser, compute_episode_metrics
 
 
 def test_compute_episode_metrics_scores_only_future_frames():
@@ -23,3 +23,18 @@ def test_compute_episode_metrics_scores_only_future_frames():
         "mae_persistence": 15.0,
         "gt_final_motion_mae_from_frame0": 20.0,
     }
+
+
+def test_evaluation_parser_records_checkpoint_label():
+    args = build_parser().parse_args(
+        [
+            "--data_root",
+            "/data",
+            "--sample_root",
+            "/samples",
+            "--checkpoint_label",
+            "continued-step20-ema",
+        ]
+    )
+
+    assert args.checkpoint_label == "continued-step20-ema"

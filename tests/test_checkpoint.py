@@ -88,3 +88,23 @@ def test_legacy_checkpoint_without_scaler_still_loads(tmp_path):
 
     assert (epoch, step) == (2, 5)
     assert scaler.loaded is None
+
+
+def test_official_bare_state_dict_initializes_model_and_ema(tmp_path):
+    source = torch.nn.Linear(2, 2)
+    with torch.no_grad():
+        source.weight.fill_(3.0)
+        source.bias.fill_(4.0)
+    path = tmp_path / "official.pt"
+    torch.save(source.state_dict(), path)
+    model = torch.nn.Linear(2, 2)
+    ema_model = torch.nn.Linear(2, 2)
+
+    epoch, step = load_pretrained(str(path), model, ema_model)
+
+    assert (epoch, step) == (0, 0)
+    for expected, actual, ema_actual in zip(
+        source.parameters(), model.parameters(), ema_model.parameters()
+    ):
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(ema_actual, expected)

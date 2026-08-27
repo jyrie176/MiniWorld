@@ -676,6 +676,73 @@ zero-shot 指标为不可回退基线；之后才进入 uncertainty-error correl
 docs/results/v100-official-055b-validation-action-ablation.md
 ```
 
+### 阶段 N：官方 0.55B Continued-training 单卡冒烟
+
+#### 问题与主线位置
+
+验证官方 0.55B checkpoint 能否正确初始化训练器的 model 与 EMA，并在 V100 FP16/SDPA 上完成优化、
+checkpoint 保存/恢复及训练前后同口径 validation。对应 Phase 4 / E2、E3、E8；目标是关闭单卡工程
+gate，而不是用 20 step 宣称质量提升。
+
+#### 发现并修复的阻塞问题
+
+训练器原来的 `load_pretrained()` 只读取封装 checkpoint 的 `model/ema_model`，面对官方 420 项裸
+state dict 会静默加载零个参数。回归测试先复现 model/EMA 未被初始化，再加入裸 state dict 识别；
+修复后 checkpoint 测试 3 项通过。
+
+以 6 latent frames 构建 0.5B 后，官方权重加载仅报告：
+
+```text
+missing: net.feat_rope.freqs_cos, net.feat_rope.freqs_sin
+unexpected: none
+```
+
+这两个是随 64→6 窗口变化重建的 RoPE buffer，不是学习参数；其余 learned weights 均继承，官方
+裸权重同时初始化 model 与 EMA。
+
+#### 配置与训练结果
+
+```text
+train episodes: 1000-1063
+validation episodes: 1064-1079
+test episodes: 1080-1095（未使用）
+model/window: 0.5B / 6 latent frames / 21 RGB frames
+batch: 1
+optimizer: AdamW
+lr / EMA / grad clip: 2e-5 / 0.9999 / 1.0
+precision / attention: FP16 GradScaler / SDPA
+effective steps: 20
+seed: 20260827
+W&B run: 9gwiazi7
+```
+
+- 20 个 loss：mean `0.1362`、median `0.1048`、min `0.0573`、max `0.3060`；
+- final loss：`0.0573`；
+- skipped steps：`0`；loss scale 全程 `65536`；
+- 最大记录 grad norm：`4.4625`，由 clip=1.0 处理；
+- 稳态吞吐：`0.925 sample/s`；
+- 运行中显存观测：`17,557 MiB / 32,768 MiB`。
+
+#### Checkpoint 与恢复
+
+step-20 checkpoint 约 `8.87GB`，包含 420 项 model、420 项 EMA、optimizer、metadata 和 scaler。
+恢复时 all keys matched，从 global step 20 和 scaler growth tracker 20 继续；step 21 正常完成，未跳步，
+新 checkpoint 的 tracker 为 21。单卡保存/恢复 gate 通过。
+
+#### 固定 Validation 前后对照
+
+| 条件 | 官方 zero-shot MAE | step-20 EMA MAE | 差值 |
+| --- | ---: | ---: | ---: |
+| real | 5.468005 | 5.467836 | -0.000170 |
+| zero | 9.367881 | 9.372440 | +0.004559 |
+| reverse | 9.240826 | 9.243434 | +0.002608 |
+
+real 对 zero/reverse/both 的胜率仍为 `15/16`、`15/16`、`14/16`，persistence 仍为 `4.468`。
+EMA decay `0.9999` 下 20 次更新只产生极小变化，因此结论是“训练链路稳定且动作能力未退化”，不支持
+“continued training 已提升质量”。
+
+独立报告：`docs/results/v100-official-055b-continued-smoke.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -686,6 +753,7 @@ docs/results/v100-official-055b-validation-action-ablation.md
 6. **像素强基线仍未攻克：** 官方 0.55B real 平均 MAE 5.468，高于 persistence 的 4.468。
 7. **旧 recon 不可信：** 反推公式错误已修复，训练与 gen 不受影响。
 8. **validation 只用于选择：** test episodes 1080-1095 继续密封，不能提前反复查看。
+9. **0.55B 单卡 continued-training gate 通过：** FP16、EMA、optimizer、scaler、保存与恢复均稳定。
 
 ## 5. 当前产物索引
 
@@ -699,24 +767,15 @@ docs/results/v100-official-055b-validation-action-ablation.md
 | 5k 固定评估 | `/data/miniworld/experiments/droid-v100-64ep-5k-eval` |
 | 官方 0.55B checkpoint | `/data/miniworld/checkpoints/miniworld-official-0.55b/MiniWorld_0_5b_droid.pt` |
 | 官方 0.55B validation 基线 | `/data/miniworld/experiments/official-055b-validation-action-ablation` |
+| 0.55B 单卡 continued checkpoint | `/data/miniworld/outputs/droid-official-055b-continued-smoke-lf6-20step` |
+| 0.55B step-20 validation | `/data/miniworld/experiments/official-055b-continued-step20-validation-action-ablation` |
 | W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 4，官方 0.55B zero-shot baseline 已建立，准备 continued-training**。不继续
-增加 0.12B 训练步数，也不提前进入创新模块或查看密封 test split。
-
-### P0：0.55B continued-training 单卡冒烟
-
-从官方裸 state dict 初始化训练器，在 train split 上运行短程单卡 FP16/SDPA 实验，验证：
-
-- pretrained 权重进入 model 与 EMA 的规则明确且严格；
-- optimizer、GradScaler、EMA 和 checkpoint 恢复链路稳定；
-- 初始与短训 validation 指标可与本节 zero-shot 基线直接比较；
-- 无 NaN/Inf，记录峰值显存、step time 和吞吐。
-
-只在冒烟稳定后决定学习率、步数和解冻策略，不直接启动昂贵长训。
+当前主线位置：**Phase 4，官方 0.55B zero-shot 和单卡 continued-training gate 已建立，准备双卡
+DDP/resource gate**。不继续增加 0.12B 训练步数，也不提前进入创新模块或查看密封 test split。
 
 ### P0：0.55B 双卡 DDP 与资源 gate
 
