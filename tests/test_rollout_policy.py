@@ -2,8 +2,12 @@ import pytest
 import numpy as np
 
 from miniworld.rollout_policy import (
+    ChunkLayout,
     Decision,
     aggregate_policy_results,
+    build_chunk_layout,
+    chunk_aligned_smoothed_hysteretic_policy,
+    chunk_aligned_threshold_policy,
     choose_operating_point,
     evaluate_offline_gate,
     fixed_policy,
@@ -156,3 +160,58 @@ def test_gate_requires_nine_episode_wins_and_tail_bound():
         "p90_not_worse_by_more_than_0_10": True,
         "passed": True,
     }
+
+
+def test_official_chunk_layout_completes_future_at_one_three_five():
+    layout = build_chunk_layout(history_len=1, future_horizon=5, chunk_size=2)
+
+    assert layout.completion_boundaries == (1, 3, 5)
+
+
+def test_layout_keeps_partial_final_chunk():
+    layout = build_chunk_layout(history_len=2, future_horizon=5, chunk_size=3)
+
+    assert layout.completion_boundaries == (1, 4, 5)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"history_len": 0, "future_horizon": 5, "chunk_size": 2},
+        {"history_len": 1, "future_horizon": 0, "chunk_size": 2},
+        {"history_len": 1, "future_horizon": 5, "chunk_size": 0},
+    ],
+)
+def test_chunk_layout_rejects_nonpositive_dimensions(kwargs):
+    with pytest.raises(ValueError):
+        build_chunk_layout(**kwargs)
+
+
+def test_step_four_trigger_waits_for_chunk_five_and_retains_three():
+    layout = build_chunk_layout(history_len=1, future_horizon=5, chunk_size=2)
+    trace = chunk_aligned_smoothed_hysteretic_policy(
+        [0.1, 0.1, 0.9, 0.9, 0.1], tau=0.45, layout=layout
+    )
+
+    assert trace.requested_observation_at == 4
+    assert trace.generated_horizon == 5
+    assert trace.retained_horizon == 3
+    assert trace.decisions[-1] is Decision.REQUEST_OBSERVATION
+
+
+def test_trigger_inside_middle_chunk_emits_after_boundary_three():
+    layout = build_chunk_layout(history_len=1, future_horizon=5, chunk_size=2)
+    trace = chunk_aligned_threshold_policy(
+        [0.1, 0.9, 0.1, 0.1, 0.1], tau=0.5, layout=layout
+    )
+
+    assert trace.requested_observation_at == 2
+    assert trace.generated_horizon == 3
+    assert trace.retained_horizon == 1
+
+
+def test_chunk_policy_rejects_uncertainty_length_different_from_layout():
+    layout = build_chunk_layout(history_len=1, future_horizon=5, chunk_size=2)
+
+    with pytest.raises(ValueError, match="future_horizon"):
+        chunk_aligned_threshold_policy([0.1] * 4, tau=0.5, layout=layout)

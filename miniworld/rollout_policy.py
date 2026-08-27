@@ -26,6 +26,14 @@ class PolicyTrace:
 
 
 @dataclass(frozen=True)
+class ChunkLayout:
+    history_len: int
+    future_horizon: int
+    chunk_size: int
+    completion_boundaries: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class EpisodePolicyResult:
     episode: int
     trace: PolicyTrace
@@ -40,6 +48,34 @@ class EpisodePolicyResult:
 def _validate_horizons(h_min: int, h_max: int, available: int) -> None:
     if not 1 <= h_min <= h_max <= available:
         raise ValueError("horizons must satisfy 1 <= h_min <= h_max <= available")
+
+
+def build_chunk_layout(
+    *, history_len: int, future_horizon: int, chunk_size: int
+) -> ChunkLayout:
+    if min(history_len, future_horizon, chunk_size) <= 0:
+        raise ValueError(
+            "history_len, future_horizon, and chunk_size must be positive"
+        )
+    total_frames = history_len + future_horizon
+    global_ends = list(range(chunk_size, total_frames, chunk_size)) + [
+        total_frames
+    ]
+    boundaries = tuple(
+        dict.fromkeys(
+            min(future_horizon, end - history_len)
+            for end in global_ends
+            if end > history_len
+        )
+    )
+    if not boundaries or boundaries[-1] != future_horizon:
+        raise ValueError("chunk layout does not cover the future horizon")
+    return ChunkLayout(
+        history_len=history_len,
+        future_horizon=future_horizon,
+        chunk_size=chunk_size,
+        completion_boundaries=boundaries,
+    )
 
 
 def _validate_uncertainty(
@@ -126,6 +162,96 @@ def smoothed_hysteretic_policy(
             trigger = step
             break
     return _trace_from_trigger(trigger, h_max)
+
+
+def _validate_chunk_policy_inputs(
+    uncertainty: Sequence[float], tau: float, layout: ChunkLayout
+) -> tuple[float, ...]:
+    values = tuple(float(value) for value in uncertainty)
+    if len(values) != layout.future_horizon:
+        raise ValueError("uncertainty length must equal layout future_horizon")
+    if not values or not all(math.isfinite(value) for value in values):
+        raise ValueError("uncertainty values must be finite")
+    if not math.isfinite(tau):
+        raise ValueError("threshold must be finite")
+    if (
+        not layout.completion_boundaries
+        or layout.completion_boundaries[-1] != layout.future_horizon
+        or tuple(sorted(set(layout.completion_boundaries)))
+        != layout.completion_boundaries
+    ):
+        raise ValueError("layout completion boundaries are invalid")
+    return values
+
+
+def _chunk_trace(
+    layout: ChunkLayout,
+    trigger_steps: Sequence[bool],
+) -> PolicyTrace:
+    previous_boundary = 1
+    start = 1
+    for boundary in layout.completion_boundaries:
+        first_trigger = next(
+            (
+                step
+                for step in range(start, boundary + 1)
+                if trigger_steps[step - 1]
+            ),
+            None,
+        )
+        if first_trigger is not None:
+            decisions = (Decision.CONTINUE,) * (boundary - 1) + (
+                Decision.REQUEST_OBSERVATION,
+            )
+            return PolicyTrace(
+                decisions=decisions,
+                retained_horizon=max(1, previous_boundary),
+                generated_horizon=boundary,
+                requested_observation_at=first_trigger,
+            )
+        previous_boundary = boundary
+        start = boundary + 1
+    horizon = layout.future_horizon
+    return PolicyTrace(
+        decisions=(Decision.CONTINUE,) * (horizon - 1) + (Decision.TERMINATE,),
+        retained_horizon=horizon,
+        generated_horizon=horizon,
+        requested_observation_at=None,
+    )
+
+
+def chunk_aligned_threshold_policy(
+    uncertainty: Sequence[float],
+    tau: float,
+    *,
+    layout: ChunkLayout,
+) -> PolicyTrace:
+    values = _validate_chunk_policy_inputs(uncertainty, tau, layout)
+    return _chunk_trace(layout, [value > tau for value in values])
+
+
+def chunk_aligned_smoothed_hysteretic_policy(
+    uncertainty: Sequence[float],
+    tau: float,
+    *,
+    layout: ChunkLayout,
+    alpha: float = 0.5,
+    consecutive: int = 2,
+) -> PolicyTrace:
+    values = _validate_chunk_policy_inputs(uncertainty, tau, layout)
+    if not math.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+        raise ValueError("alpha must lie in (0, 1]")
+    if consecutive < 1:
+        raise ValueError("consecutive must be positive")
+    ema = values[0]
+    run_length = 0
+    trigger_steps = []
+    for step, value in enumerate(values, start=1):
+        if step > 1:
+            ema = alpha * value + (1.0 - alpha) * ema
+        run_length = run_length + 1 if ema > tau else 0
+        trigger_steps.append(run_length >= consecutive)
+    return _chunk_trace(layout, trigger_steps)
 
 
 def score_policy_trace(
