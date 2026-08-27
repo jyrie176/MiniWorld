@@ -911,6 +911,54 @@ uncertainty-error correlation。
 
 独立报告：`docs/results/v100-official-055b-expanded1064-continued-1k.md`。
 
+### 阶段 R：Expanded Data + Lower LR 最终 Baseline 选择
+
+#### 问题与单变量设计
+
+阶段 Q 证明扩到 1064 episodes 能恢复动作泛化，但 `LR=2e-5` 仍破坏质量。本阶段保持数据、官方
+初始化、双卡 global batch=2、1000 steps、EMA、FP16/SDPA、seed 和 validation 不变，只将 LR
+降为 `2e-6`。这是 Phase 4 最后一组 continued-training 选择实验；test 1080-1095 保持密封。
+
+#### 训练结果
+
+```text
+dataset: episodes 0-1063
+LR / EMA / clip: 2e-6 / 0.9999 / 1.0
+effective steps: 1000
+W&B: d59p17p7
+```
+
+训练退出码 0。一次早期 overflow 被安全跳过，scale `65536→32768` 后稳定；100 个记录点的
+mean/median loss 为 `0.1314/0.0911`，range `0.0485-0.5794`。毛刺对应有限梯度，是多任务轨迹
+难度差异，不是数值发散。吞吐约 `0.85 step/s` / `1.70 sample/s`，checkpoint 为 step 531/1000。
+
+#### 固定 Validation
+
+| 权重 | step 531 | step 1000 | 官方 | expanded `2e-5` step 1000 |
+| --- | ---: | ---: | ---: | ---: |
+| model | 5.5340 | 5.5779 | **5.4680** | 6.3781 |
+| EMA | 5.4670 | 5.4630 | 5.4680 | 5.5007 |
+
+降 LR 显著减少遗忘：final model/EMA 相对 `2e-5` 改善 `0.8002/0.0376`。但 final model 仍比
+官方差 `0.1099`，仅 `3/16` episode 改善。final EMA 数值上优 `0.0050`、`13/16` episode 为负
+delta，但变化仅官方 MAE 的 `0.09%`，大部分逐 episode 差异只有 0.00x RGB 值；在 16 条选择集上
+不构成有实际意义的质量收益。
+
+final model 的 real/zero/reverse 为 `5.5779/9.4563/9.3373`；real 胜 `15/16`、`16/16`、同时
+最佳 `15/16`，动作控制保持强健。persistence 仍为 `4.4681`，核心静态强基线限制未改变。
+
+#### Phase 4 冻结决策
+
+最终 checkpoint 完整包含 420 model、420 EMA、optimizer、metadata、scaler，epoch 2 / step 1000，
+scale `32768`、tracker `982`。
+
+Phase 4 正式冻结**官方 zero-shot 0.55B checkpoint**，不选 continued checkpoint：64 episodes
+高 LR 明显遗忘；扩到 1064 episodes 恢复动作泛化但质量仍退化；lower LR 只把 EMA 变化压到近零，
+没有可信收益。停止继续搜索 continued-training 超参数，下一主线进入 uncertainty-error correlation。
+test 继续密封，留给最终冻结方法的一次性报告。
+
+独立报告：`docs/results/v100-official-055b-expanded1064-lr2e6-continued-1k.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -925,6 +973,7 @@ uncertainty-error correlation。
 10. **0.55B 双卡 DDP gate 通过：** 1.67x 吞吐、83.4% 效率、分片无重复、恢复稳定。
 11. **0.55B 1k 全参数续训无收益：** model MAE 明显恶化，EMA 近似原点但没有改善，不能直接扩到 5k。
 12. **扩到 1064 episodes 只解决部分问题：** 动作胜率恢复官方水平，但 model/EMA 质量仍差于官方；下一变量应是 LR。
+13. **Phase 4 已冻结官方 0.55B：** LR `2e-6` 消除大部分遗忘但没有实际收益，停止 continued-training 搜索。
 
 ## 5. 当前产物索引
 
@@ -946,26 +995,28 @@ uncertainty-error correlation。
 | Expanded 1064-episode 数据集 | `/data/miniworld/datasets/droid-expanded-0-1063` |
 | Expanded 1k checkpoints | `/data/miniworld/outputs/droid-official-055b-expanded1064-continued-1k-lf6-ddp2` |
 | Expanded 1k validation | `/data/miniworld/experiments/official-055b-expanded1064-continued-1k-validation` |
-| W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
+| Lower-LR 1k checkpoints | `/data/miniworld/outputs/droid-official-055b-expanded1064-lr2e6-1k-lf6-ddp2` |
+| Lower-LR 1k validation | `/data/miniworld/experiments/official-055b-expanded1064-lr2e6-1k-validation` |
+| 0.12B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
+| Lower-LR 0.55B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/d59p17p7` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 4，官方 0.55B zero-shot、工程 gate 和首个 1k-step continued-training
-baseline 均已完成；正在决定保守适配是否值得保留**。不继续增加 0.12B 训练步数，不查看密封 test。
+当前主线位置：**Phase 4 已冻结官方 0.55B zero-shot baseline；下一阶段进入 uncertainty-error
+correlation**。不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
 
-### P0：continued-training baseline 正式对照
+### P0：Phase 4 冻结结果
 
-64 和 1064 episodes 上的全参数 `LR=2e-5` 配方均已被 validation 否决。下一项保持 expanded
-data 与 1k budget，只把 LR 降到 `2e-6`，至少比较：
+continued-training 选择已结束，官方 zero-shot 胜出，作为后续创新实验的统一 checkpoint。冻结依据：
 
-- 官方 zero-shot；
-- continued-training checkpoint 的 real/zero/reverse；
-- persistence、RGB MAE，以及新增的感知/运动指标；
-- 质量变化、训练成本、采样吞吐和显存。
+- 官方 real/zero/reverse MAE 与动作胜率；
+- 64 与 1064 episodes 的 `LR=2e-5` 负面对照；
+- expanded data 的 `LR=2e-6` 保守适配对照；
+- persistence、RGB MAE、训练成本、采样吞吐和显存。
 
-只有在动作控制不退化且整体收益可解释时，才用 continued checkpoint；否则冻结官方 zero-shot
-作为 Phase 4 baseline。test split 仅在方案冻结后使用一次。
+下一项先建立 uncertainty 与未来预测误差的相关性，确认信号有效后才实现 adaptive rollout。
+test split 继续保留到完整创新方法冻结后使用一次。
 
 ### P2：进入项目创新主线
 
