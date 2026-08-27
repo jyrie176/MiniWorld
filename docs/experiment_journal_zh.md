@@ -1107,6 +1107,26 @@ chunk、K=4 设置下声称推理提速。若继续，`df_chunk_size=1` 必须�
 轻量归档 SHA256 为 `986462de7cee3df2183968d05cf5d2b74ccf6a7b131323c7d4be8440d7818616`
 （40 KiB，不重复打包源视频、latent 或 checkpoint）。
 
+### 阶段 W：不确定性感知选择性预测
+
+#### 为什么从 early stopping 转向 reliability gating
+
+阶段 V 证明逐步 uncertainty 有 error-ranking 信号，但在真实 `(1,3,5)` chunk 完成边界上不能稳定减少
+生成工作。本阶段保留同一冻结官方 0.55B、validation 1064-1079 与 K=4 的 80 条指标，将动作从
+“提前停止以加速”改为“拒绝高风险预测并请求新观测”。不训练、不重新采样、不读取 test。
+
+#### 正式结果
+
+| signal | AURC / random / oracle | LOEO coverage | mean MAE / full | worst / full |
+| --- | ---: | ---: | ---: | ---: |
+| latent disagreement | 4.4025 / 5.4804 / 3.8187 | 0.8125 | 4.7829 / 5.4804 | 7.9104 / 14.0572 |
+| RGB disagreement | **3.8979 / 5.4804 / 3.8187** | **0.8000** | **4.7158 / 5.4804** | **7.5638 / 14.0572** |
+
+RGB 80% policy 拒绝 16/80 个预测，平均 MAE 下降 `13.95%`，worst MAE 下降 `46.19%`。阈值按
+LOEO 只从其余 15 episodes 的 uncertainty 选择；oracle 只作不可部署上界。结论是 uncertainty 可以
+提供输出信任边界，不是模型精度提升、在线加速或闭环控制收益。独立报告：
+`docs/results/v100-official-055b-selective-prediction.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -1127,6 +1147,8 @@ chunk、K=4 设置下声称推理提速。若继续，`df_chunk_size=1` 必须�
     信任截断，不代表 executable chunk 成本。
 16. **Chunk-aligned Stage A′ 失败：** 单阈值不能同时守住 coverage/质量，EMA 不避开完整 chunk；当前设置
     不进入在线 early-stopping。
+17. **选择性预测信号成立：** RGB disagreement 的 AURC `3.8979`，优于 random `5.4804` 并接近
+    oracle `3.8187`；LOEO 80% coverage 将 mean/worst MAE 分别降低 `13.95%/46.19%`。
 
 ## 5. 当前产物索引
 
@@ -1154,15 +1176,16 @@ chunk、K=4 设置下声称推理提速。若继续，`df_chunk_size=1` 必须�
 | Formal uncertainty correlation | `/data/miniworld/experiments/official-055b-uncertainty-correlation-k4` |
 | Adaptive rollout offline | `/data/miniworld/experiments/official-055b-adaptive-rollout-offline` |
 | Chunk-aligned adaptive rollout | `/data/miniworld/experiments/official-055b-adaptive-rollout-chunk-aligned` |
+| Selective prediction | `/data/miniworld/experiments/official-055b-selective-prediction` |
 | 0.12B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | Lower-LR 0.55B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/d59p17p7` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 5 的 chunk-aligned Stage A′ 已完成且失败；在线 early-stopping 暂停。** 下一项
-应决定是把 `df_chunk_size=1` 作为独立推理基线，还是保留 uncertainty 作为信任度分析并进入其他创新
-消融。无论选择哪条，不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
+当前主线位置：**Phase 5 的在线 early-stopping 已停止，但 uncertainty reliability gating 已得到正结果。**
+下一项优先做 K=1/2/4 的成本—可靠性消融；只有先冻结信号、K 和 coverage，才允许对密封 test 做一次
+最终确认。不继续增加 0.12B 或 continued-training 步数。
 
 ### P0：Phase 4 冻结结果
 
