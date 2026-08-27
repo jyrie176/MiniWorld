@@ -504,6 +504,58 @@ x_pred = z + t * v_pred
 
 后续每轮评估都应将小型结果包放入 exports；大 checkpoint 不默认同步，以免浪费带宽和本地空间。
 
+---
+
+### 阶段 K：固定 Train / Validation / Test 划分
+
+#### 主线映射
+
+Phase 3 / E1 / “0.12B sanity 有 episode 隔离、可审计且能复用于 0.55B 的评估划分”。
+
+#### 为什么现在做
+
+此前 episode 1000 的指标来自训练数据，只能诊断模型和动作链路，不能代表泛化。继续在训练 episode
+上选择 checkpoint 或调整动作评估会产生数据泄漏，也无法为后续 0.55B zero-shot/continued training
+提供公平基线。
+
+#### 固定划分
+
+| Split | Episodes | Count | 用途 |
+| --- | --- | ---: | --- |
+| train | 1000-1063 | 64 | 已完成的 0.12B 5k-step 训练 |
+| validation | 1064-1079 | 16 | checkpoint、方法、阈值与诊断选择 |
+| test | 1080-1095 | 16 | 最终报告，当前封存 |
+
+本地数据路径：
+
+```text
+/data/miniworld/datasets/droid-mini-1000-1063
+/data/miniworld/datasets/droid-validation-1064-1079
+/data/miniworld/datasets/droid-test-1080-1095
+```
+
+只下载每个 episode 的 parquet 和 `observation.images.exterior_image_1_left` 视频，没有下载完整 DROID。
+
+#### 校验结果
+
+- 96 个 episode 互不重叠，当前新增 validation/test 各 16 个。
+- 新增 32 个 episode 全部 `success=true`，最短 75 帧，满足 21 帧窗口。
+- validation 与 test 均为 16 parquet + 16 video。
+- 32/32 视频完整解码；视频张量 `(21, 240, 320, 3)`、动作张量 `(20, 7)`，全部 finite。
+- 已记录各 split 的 episode manifest、数据内容 digest 与使用规则：
+
+```text
+manifests/droid-eval-splits.md
+manifests/droid-train-1000-1063/episodes.jsonl
+manifests/droid-validation-1064-1079/episodes.jsonl
+manifests/droid-test-1080-1095/episodes.jsonl
+```
+
+#### 使用边界
+
+validation 可以用于当前 0.12B 动作消融和后续 0.55B 方法选择。test 目前只做文件完整性检查，
+不运行模型、不查看质量指标，直到最终方案冻结。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -551,7 +603,7 @@ x_pred = z + t * v_pred
 报告平均 MAE、中位数、逐 episode real 胜率和代表性视频。只有 real 在多数 episode 上优于两个对照，
 才能初步认为动作条件学习有效。
 
-### P0：固定 validation split 与 0.12B 验收
+### P0（数据划分已完成）：固定 validation split 与 0.12B 验收
 
 建立按 episode 隔离、可审计的 validation/test manifest，不再仅使用训练 episode 判断泛化。汇总：
 
