@@ -556,6 +556,57 @@ manifests/droid-test-1080-1095/episodes.jsonl
 validation 可以用于当前 0.12B 动作消融和后续 0.55B 方法选择。test 目前只做文件完整性检查，
 不运行模型、不查看质量指标，直到最终方案冻结。
 
+---
+
+### 阶段 L：0.12B Held-out Validation 动作消融
+
+#### 主线映射
+
+Phase 3 / E1 / “判断 0.12B 是否在未训练 episode 上学到可靠动作控制”。
+
+#### 配置
+
+- checkpoint：64-episode、5k-step 最终 EMA；
+- validation：episodes 1064-1079，共 16 个，未参与训练；
+- test：保持封存，未运行模型；
+- 条件：real、zero-valued normalized action、reverse；
+- seed：`20260827 + sample_index`，三组完全一致；
+- rollout：1 个观察 latent、共 6 latent / 21 RGB 帧；
+- 指标：未来 20 个 RGB 帧的 0-255 MAE。
+
+代码参数 `shuffle` 当前实际执行确定性时间倒序，因此报告统一称为 reverse。zero 是归一化空间数值零，
+不等于 learned null/unconditional action。
+
+#### 结果
+
+| 条件 | 平均 MAE | 中位 MAE |
+| --- | ---: | ---: |
+| real | 12.700 | 12.181 |
+| zero-valued | **12.293** | **12.143** |
+| reverse | 12.701 | 12.228 |
+
+- real 优于 zero：3/16；
+- real 优于 reverse：10/16；
+- real 同时优于两者：3/16；
+- real 与 reverse 平均差仅 `0.002`，基本相同；
+- real 与 zero 输出差异 MAE 为 `2.772`，real 与 reverse 为 `1.673`，说明动作会改变输出，但方向不可靠。
+
+首帧 persistence baseline（重复第一帧）平均 MAE 为 `4.584`，并在 16/16 episode 上优于 real
+生成。RGB MAE 会偏好静态/清晰输出，且部分 episode 的前 21 帧运动较弱，因此后续正式评测需要
+多固定窗口与感知特征指标；但当前结果仍不能支持“0.12B 学会 held-out 动作控制”。
+
+#### 判断与停止条件
+
+0.12B 已完成工程 sanity：V100 FP16/SDPA、EMA、checkpoint、held-out 评估链路均可运行；但动作质量
+gate 未通过。停止无目的追加 0.12B 训练。只诊断会同样阻塞 0.55B 的正确性问题（首先是动作/视频
+时间对齐），完成 DDP/资源 gate 后进入 0.55B pretrained zero-shot baseline。
+
+独立报告：
+
+```text
+docs/results/v100-012b-validation-action-ablation.md
+```
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
