@@ -1,5 +1,11 @@
 # V100 官方 0.55B 自适应 Rollout 离线评估
 
+> **2026-08-27 成本语义更正：** 本报告的 retained-quality 结论仍有效，但
+> `generated coverage=0.9375` 是逐 latent-step 理想化代理。官方 `history_len=1`、
+> `df_chunk_size=2` 的真实完成边界为 `(1,3,5)`；冻结 EMA 策略按 chunk 重放后 generated coverage
+> 为 `1.0`。因此本文的“在线授权”已被 Stage A′ 取代且撤销。详见
+> `docs/results/v100-official-055b-adaptive-rollout-chunk-aligned.md`。
+
 ## 问题与主线位置
 
 Phase 5 已证明 sampling disagreement 与未来 RGB error 相关。本实验回答下一层问题：在不重新训练、
@@ -51,9 +57,9 @@ step，离线解析成本代理从 20 降至 18.75，只节省 `6.25%`，不能�
 coverage、episode MAE、解析 fixed mixture、wins、p90 和四项 gate，没有调用评估器内部函数。全部数值与
 JSON 在预注册的 `1e-12`（比例）和 `1e-9`（RGB MAE）容差内一致。
 
-结论：**离线门禁通过，授权为 EMA + 连续两步 latent uncertainty 策略编写在线提前停止实现计划。**
-这不是最终方法冻结，也不授权查看 test；在线阶段必须验证同批 K=4 的提前停止语义、真实生成成本和输出
-一致性，通过后才能继续 horizon/threshold/K/OOD/resource ablations。
+原始逐步代理结论为：EMA + 连续两步策略通过 retained-quality 门禁。后续 Stage A′ 已证明该策略在真实
+chunk 边界下不节省完整生成 chunk，并撤销在线实现授权。本报告保留原始结果用于追溯，不再作为下一步
+执行依据；test 仍未查看。
 
 正式产物：`/data/miniworld/experiments/official-055b-adaptive-rollout-offline`。
 结果归档：`/data/miniworld/exports/miniworld-official-055b-adaptive-rollout-offline.tar.gz`，SHA256

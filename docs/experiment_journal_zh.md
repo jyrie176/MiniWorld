@@ -1079,6 +1079,34 @@ coverage 所暗示的 18.75%；相对 `K=1,H=5` 仍约贵 3.75 倍。`REQUEST_OB
 结果归档 SHA256 为 `7492b80ca0b14812e601a4aead8de0165d57c52c47b7a594c2e501e129c902c4`
 （40 KiB，不重复打包源视频、latent 或 checkpoint）。
 
+### 阶段 V：Chunk-Aligned Adaptive Rollout Stage A′
+
+#### 为什么必须重做成本门禁
+
+阶段 U 的 retained-quality 结果成立，但其 generated horizon 按逐 latent step 计数。正式 sampling manifest
+确认 `history_len=1`、`df_chunk_size=2`，未来完成边界实际只有 `(1,3,5)`；step 4 和 5 同属最后一个
+chunk。冻结 EMA 阈值的全部触发都在 step 4/5，按真实 chunk 重放 generated coverage 是 1.0，而不是
+0.9375。该问题在 test 仍密封时发现，因此撤销阶段 U 的在线授权，使用同一冻结 validation 80 行重新做
+LOEO，不训练、不采样、不解码。
+
+#### 正式结果与决定
+
+| policy | retained/generated coverage | RGB MAE / matched fixed | wins | gate |
+| --- | ---: | ---: | ---: | --- |
+| threshold | 0.775 / 0.950 | 4.8328 / 4.8213 | 7/16 | fail |
+| EMA + hysteresis | 0.850 / 1.000 | 4.8429 / 5.0616 | 6/16 | fail |
+
+单阈值避开 4/80 个完整 future steps，但 coverage、平均质量和 episode wins 均失败。EMA 策略通过 coverage
+和平均质量，却没有避开任何完整 chunk，且只赢 6/16。独立标准库脚本复算 coverage、numerator/count、
+mean/median/p90/worst、matched fixed、wins、五项 gate 和 K=4/K=1 成本，与 JSON 在 `1e-12/1e-9`
+容差内一致。
+
+Stage A′ 正式失败，在线模型代码不修改。uncertainty 仍可用于输出信任边界，但不能在当前五步、两帧
+chunk、K=4 设置下声称推理提速。若继续，`df_chunk_size=1` 必须作为改变官方推理配置的新基线子项目，
+不能当作自动 fallback。独立报告：`docs/results/v100-official-055b-adaptive-rollout-chunk-aligned.md`。
+轻量归档 SHA256 为 `986462de7cee3df2183968d05cf5d2b74ccf6a7b131323c7d4be8440d7818616`
+（40 KiB，不重复打包源视频、latent 或 checkpoint）。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -1095,8 +1123,10 @@ coverage 所暗示的 18.75%；相对 `K=1,H=5` 仍约贵 3.75 倍。`REQUEST_OB
 12. **扩到 1064 episodes 只解决部分问题：** 动作胜率恢复官方水平，但 model/EMA 质量仍差于官方；下一变量应是 LR。
 13. **Phase 4 已冻结官方 0.55B：** LR `2e-6` 消除大部分遗忘但没有实际收益，停止 continued-training 搜索。
 14. **Phase 5 核心信号成立：** latent/RGB disagreement 均通过预注册 correlation gate，下一步设计 adaptive rollout。
-15. **Adaptive rollout 离线门禁通过：** EMA + 连续两步 latent 策略在 81.25% coverage 下优于匹配 fixed，
-    10/16 episodes 胜出；授权在线实现，但计算节省目前只有 6.25% 的解析代理。
+15. **逐步 adaptive retained-quality 曾通过，但在线授权已撤销：** 原 81.25% coverage 结果是逐 latent-step
+    信任截断，不代表 executable chunk 成本。
+16. **Chunk-aligned Stage A′ 失败：** 单阈值不能同时守住 coverage/质量，EMA 不避开完整 chunk；当前设置
+    不进入在线 early-stopping。
 
 ## 5. 当前产物索引
 
@@ -1123,14 +1153,16 @@ coverage 所暗示的 18.75%；相对 `K=1,H=5` 仍约贵 3.75 倍。`REQUEST_OB
 | Uncertainty GPU gate | `/data/miniworld/experiments/official-055b-uncertainty-gate-k2-v2` |
 | Formal uncertainty correlation | `/data/miniworld/experiments/official-055b-uncertainty-correlation-k4` |
 | Adaptive rollout offline | `/data/miniworld/experiments/official-055b-adaptive-rollout-offline` |
+| Chunk-aligned adaptive rollout | `/data/miniworld/experiments/official-055b-adaptive-rollout-chunk-aligned` |
 | 0.12B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | Lower-LR 0.55B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/d59p17p7` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 5 的 adaptive rollout 离线门禁已通过；下一项实现并验证在线 EMA + 连续两步
-提前停止**。不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
+当前主线位置：**Phase 5 的 chunk-aligned Stage A′ 已完成且失败；在线 early-stopping 暂停。** 下一项
+应决定是把 `df_chunk_size=1` 作为独立推理基线，还是保留 uncertainty 作为信任度分析并进入其他创新
+消融。无论选择哪条，不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
 
 ### P0：Phase 4 冻结结果
 
@@ -1141,8 +1173,8 @@ continued-training 选择已结束，官方 zero-shot 胜出，作为后续创�
 - expanded data 的 `LR=2e-6` 保守适配对照；
 - persistence、RGB MAE、训练成本、采样吞吐和显存。
 
-uncertainty 与未来预测误差的相关性已建立，离线 fixed/threshold/smoothed-hysteresis 比较也已完成。
-下一项把通过的 smoothed/hysteresis 策略接入在线推理，验证它是否真正减少生成计算且保持离线语义。
+uncertainty 与未来预测误差的相关性已建立，但 chunk-aligned 自适应提前停止未通过。不得接入在线推理。
+下一候选若为 `df_chunk_size=1`，必须先重新建立 fixed K=1/K=4 质量与资源基线，再重新设计策略门禁。
 test split 继续保留到完整创新方法冻结后使用一次。
 
 ### P2：进入项目创新主线
