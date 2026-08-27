@@ -849,6 +849,68 @@ zero-shot 继续作为 Phase 4 质量基线。下一步只做一次更保守、�
 
 独立报告：`docs/results/v100-official-055b-continued-1k.md`。
 
+### 阶段 Q：训练集扩到 1064 Episodes 的单变量对照
+
+#### 问题与动机
+
+阶段 P 在 64 episodes 上出现训练 loss 下降、validation 退化。为区分“数据反复过拟合”和“全参数
+适配强度过高”，本阶段把训练集扩到 episodes 0-1063，其余官方初始化、双卡 global batch=2、
+1000 steps、LR、EMA、FP16/SDPA 和 validation 全部不变。仍属于 Phase 4 baseline；test 1080-1095
+继续密封。
+
+#### 数据扩容与审计
+
+从 `GEAR-Dreams/DreamZero-DROID-Data` 只下载 chunk-000 的 parquet 和
+`exterior_image_1_left` 视频，再硬链接已有 chunk-001 的 1000-1063。最终 1064 个 episode 连续、
+全部 success，长度 46-1481 帧。全量实际读取 1064/1064：视频 `(21,240,320,3)`、动作 `(20,7)`，
+全部 finite。
+
+```text
+dataset: /data/miniworld/datasets/droid-expanded-0-1063
+episodes.jsonl SHA: c57b4c83e1134be2a4a7ac23e6959ad1216270d6d5e085cd60090619eb938793
+content digest: 2645485be04d479fa3571351462846ffaf801b3b7a16492e3cd71df5ec2737f1
+manifest: manifests/droid-train-expanded-0-1063.md
+```
+
+下载过程中两次无效尝试均已诊断且未产生媒体文件：官方 snapshot API 枚举全仓库过慢；首次直接
+下载因 `xargs -I %` 误替换 `printf` 格式符而请求错误文件名。修正为位置参数后 2000 个文件完整
+下载，结构和内容审计通过。
+
+#### 训练
+
+```text
+model/window: official 0.55B / 6 latent frames
+runtime: 2x V100 DDP, global batch 2
+optimizer: AdamW, LR 2e-5, EMA 0.9999, clip 1.0
+budget: 1000 effective steps，约 1.88 次数据遍历
+W&B: csp6jnw6
+```
+
+训练退出码 0。一次 overflow 被安全跳过，scale `65536→32768`，之后稳定；记录 loss 前半均值
+`0.1169`、后半 `0.1088`，final `0.0847`，吞吐约 `0.85 step/s` / `1.70 sample/s`。checkpoint
+为 step 531 和 1000。
+
+#### Validation 与判断
+
+| 权重 | step 531 | step 1000 | 官方 | 64-episode step 1000 |
+| --- | ---: | ---: | ---: | ---: |
+| model | 8.7416 | 6.3781 | **5.4680** | 6.4532 |
+| EMA | 5.4804 | 5.5007 | **5.4680** | 5.4759 |
+
+expanded final model 相对 64-episode 改善 `0.0751`，逐 episode 胜 `10/16`；但仍比官方差
+`0.9101`，只在 `1/16` 上胜官方。final EMA 比官方差 `0.0326`。
+
+final model 的 real/zero/reverse 为 `6.3781/9.2527/9.0868`；real 胜率恢复到
+`15/16`、`15/16`、同时最佳 `14/16`，与官方完全一致，并优于 64-episode continued model 的
+`13/16`、`14/16`、`12/16`。
+
+结论：数据不足确实影响动作泛化，扩容恢复了动作控制一致性，也让 final model 小幅改善；但它没
+解决整体质量退化。主要矛盾转为 `LR=2e-5` 的全参数适配强度过高，不能把本配方扩到 5k。下一项
+应保持 expanded data 与 1k budget，只把 LR 降到 `2e-6`；若仍无收益，冻结官方 zero-shot 并进入
+uncertainty-error correlation。
+
+独立报告：`docs/results/v100-official-055b-expanded1064-continued-1k.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -862,6 +924,7 @@ zero-shot 继续作为 Phase 4 质量基线。下一步只做一次更保守、�
 9. **0.55B 单卡 continued-training gate 通过：** FP16、EMA、optimizer、scaler、保存与恢复均稳定。
 10. **0.55B 双卡 DDP gate 通过：** 1.67x 吞吐、83.4% 效率、分片无重复、恢复稳定。
 11. **0.55B 1k 全参数续训无收益：** model MAE 明显恶化，EMA 近似原点但没有改善，不能直接扩到 5k。
+12. **扩到 1064 episodes 只解决部分问题：** 动作胜率恢复官方水平，但 model/EMA 质量仍差于官方；下一变量应是 LR。
 
 ## 5. 当前产物索引
 
@@ -880,6 +943,9 @@ zero-shot 继续作为 Phase 4 质量基线。下一步只做一次更保守、�
 | 0.55B DDP gate | `/data/miniworld/experiments/droid-official-055b-ddp-gate-*` |
 | 0.55B 1k continued checkpoints | `/data/miniworld/outputs/droid-official-055b-continued-1k-lf6-ddp2` |
 | 0.55B 1k validation | `/data/miniworld/experiments/official-055b-continued-1k-validation` |
+| Expanded 1064-episode 数据集 | `/data/miniworld/datasets/droid-expanded-0-1063` |
+| Expanded 1k checkpoints | `/data/miniworld/outputs/droid-official-055b-expanded1064-continued-1k-lf6-ddp2` |
+| Expanded 1k validation | `/data/miniworld/experiments/official-055b-expanded1064-continued-1k-validation` |
 | W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
@@ -890,8 +956,8 @@ baseline 均已完成；正在决定保守适配是否值得保留**。不继续
 
 ### P0：continued-training baseline 正式对照
 
-首个全参数 `LR=2e-5` 配方已被 validation 否决。下一项只做一个有边界的 lower-LR/partial-freeze
-对照，至少比较：
+64 和 1064 episodes 上的全参数 `LR=2e-5` 配方均已被 validation 否决。下一项保持 expanded
+data 与 1k budget，只把 LR 降到 `2e-6`，至少比较：
 
 - 官方 zero-shot；
 - continued-training checkpoint 的 real/zero/reverse；
