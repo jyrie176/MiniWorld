@@ -795,6 +795,60 @@ validation/checkpoint 节奏；尚不进入 uncertainty-aware 创新阶段。
 
 独立报告：`docs/results/v100-official-055b-ddp-resource-gate.md`。
 
+### 阶段 P：官方 0.55B 双卡 1k-step Continued-Training Baseline
+
+#### 问题与动机
+
+在工程 gate 全部通过后，用有边界的 1000 个有效 step 回答：本地 64-episode DROID 续训是否能让
+官方 0.55B 在固定 validation 上变好，并保持动作控制。这仍属于 Phase 4 baseline，不进入创新模块；
+test episodes 1080-1095 全程密封。
+
+#### 配置
+
+```text
+train / validation: episodes 1000-1063 / 1064-1079
+model/window: official 0.55B / 6 latent frames / 21 RGB frames
+runtime: 2x V100 DDP, per-rank batch 1, global batch 2
+optimizer: AdamW, LR 2e-5, EMA 0.9999, grad clip 1.0
+precision / attention: FP16 GradScaler / SDPA
+effective steps: 1000
+seed base: 20260827
+W&B run: k2y8o0jh
+```
+
+保存点为 step 320、639、959、1000。attempted step 340 出现一次非有限梯度并被 GradScaler 安全
+跳过，scale 从 `65536` 降为 `32768`，之后直到结束无第二次跳步。最终 loss `0.053203`，稳态约
+`0.85 step/s` / `1.70 sample/s`。后段 step 640-959 的记录均值 `0.0908`，低于前段 1-320 的
+`0.1149`，数值训练稳定。
+
+#### 固定 Validation
+
+使用相同 16 个 validation episodes、real action、seed、20 sampling steps 和 CFG 2.0：
+
+| 权重 | step 320 | step 639 | step 1000 | 官方 zero-shot |
+| --- | ---: | ---: | ---: | ---: |
+| model | 6.7049 | 7.2835 | 6.4532 | 5.4680 |
+| EMA | 5.4695 | 5.4742 | 5.4759 | 5.4680 |
+
+model 相对官方逐 episode 改善数为 `0/16`、`0/16`、`1/16`；EMA 均值仅漂移 `+0.0015`、
+`+0.0062`、`+0.0079`。最终 model 明显变化，因此按预定规则追加动作对照：real/zero/reverse
+为 `6.4532/8.4448/9.2114`，real 胜率 `13/16`、`14/16`、同时最佳 `12/16`。动作通路仍有效，
+但整体质量和动作优势均弱于官方 checkpoint。
+
+#### Checkpoint、异常与判断
+
+最终 checkpoint 为 epoch 32 / global step 1000，含 420 项 model、420 项 EMA、optimizer、metadata
+和 scaler；大小 8,865,354,022 bytes，scaler scale `32768`、growth tracker `660`。评估首次沿用
+官方 64 帧流式缓存，6 帧 checkpoint 的安全断言正确拒绝；将 active window 改为恰好 6 帧后重跑，
+所有 96 条 real 视频及最终 32 条动作对照均成功。失败尝试没有形成指标，也未访问 test。
+
+判断：不能把相同 `LR=2e-5 + 全参数 + 64 episodes` 配方直接延长到 5k。训练 loss 下降而
+validation model MAE 恶化，符合小数据过拟合/灾难性遗忘；EMA 只压住退化，没有带来收益。官方
+zero-shot 继续作为 Phase 4 质量基线。下一步只做一次更保守、边界清晰的 lower-LR/partial-freeze
+适配对照；若仍无收益，就冻结官方 checkpoint 并进入 uncertainty-error correlation。
+
+独立报告：`docs/results/v100-official-055b-continued-1k.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -807,6 +861,7 @@ validation/checkpoint 节奏；尚不进入 uncertainty-aware 创新阶段。
 8. **validation 只用于选择：** test episodes 1080-1095 继续密封，不能提前反复查看。
 9. **0.55B 单卡 continued-training gate 通过：** FP16、EMA、optimizer、scaler、保存与恢复均稳定。
 10. **0.55B 双卡 DDP gate 通过：** 1.67x 吞吐、83.4% 效率、分片无重复、恢复稳定。
+11. **0.55B 1k 全参数续训无收益：** model MAE 明显恶化，EMA 近似原点但没有改善，不能直接扩到 5k。
 
 ## 5. 当前产物索引
 
@@ -823,25 +878,28 @@ validation/checkpoint 节奏；尚不进入 uncertainty-aware 创新阶段。
 | 0.55B 单卡 continued checkpoint | `/data/miniworld/outputs/droid-official-055b-continued-smoke-lf6-20step` |
 | 0.55B step-20 validation | `/data/miniworld/experiments/official-055b-continued-step20-validation-action-ablation` |
 | 0.55B DDP gate | `/data/miniworld/experiments/droid-official-055b-ddp-gate-*` |
+| 0.55B 1k continued checkpoints | `/data/miniworld/outputs/droid-official-055b-continued-1k-lf6-ddp2` |
+| 0.55B 1k validation | `/data/miniworld/experiments/official-055b-continued-1k-validation` |
 | W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 4，官方 0.55B zero-shot、单卡和双卡 DDP/resource gate 均已建立，准备
-正式 continued-training baseline**。不继续增加 0.12B 训练步数，也不提前进入创新模块或查看密封
-test split。
+当前主线位置：**Phase 4，官方 0.55B zero-shot、工程 gate 和首个 1k-step continued-training
+baseline 均已完成；正在决定保守适配是否值得保留**。不继续增加 0.12B 训练步数，不查看密封 test。
 
 ### P0：continued-training baseline 正式对照
 
-使用 validation 选择 checkpoint 与超参数，至少比较：
+首个全参数 `LR=2e-5` 配方已被 validation 否决。下一项只做一个有边界的 lower-LR/partial-freeze
+对照，至少比较：
 
 - 官方 zero-shot；
 - continued-training checkpoint 的 real/zero/reverse；
 - persistence、RGB MAE，以及新增的感知/运动指标；
 - 质量变化、训练成本、采样吞吐和显存。
 
-只有在动作控制不退化且整体收益可解释时，才冻结 Phase 4 baseline。test split 仅在方案冻结后使用一次。
+只有在动作控制不退化且整体收益可解释时，才用 continued checkpoint；否则冻结官方 zero-shot
+作为 Phase 4 baseline。test split 仅在方案冻结后使用一次。
 
 ### P2：进入项目创新主线
 

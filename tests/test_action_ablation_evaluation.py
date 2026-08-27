@@ -1,6 +1,10 @@
 import torch
 
-from scripts.evaluate_droid_action_ablation import build_parser, compute_episode_metrics
+from scripts.evaluate_droid_action_ablation import (
+    build_parser,
+    compute_episode_metrics,
+    compute_real_episode_metrics,
+)
 
 
 def test_compute_episode_metrics_scores_only_future_frames():
@@ -38,3 +42,25 @@ def test_evaluation_parser_records_checkpoint_label():
     )
 
     assert args.checkpoint_label == "continued-step20-ema"
+
+
+def test_compute_real_episode_metrics_does_not_require_ablation_videos():
+    ground_truth = torch.tensor([0, 10, 20], dtype=torch.uint8).reshape(3, 1, 1, 1)
+    real = torch.tensor([100, 12, 18], dtype=torch.uint8).reshape(3, 1, 1, 1)
+
+    metrics = compute_real_episode_metrics(ground_truth, real)
+
+    assert metrics == {
+        "mae_real": 2.0,
+        "final_mae_real": 2.0,
+        "mae_persistence": 15.0,
+        "gt_final_motion_mae_from_frame0": 20.0,
+    }
+
+
+def test_evaluation_parser_accepts_real_only_mode():
+    args = build_parser().parse_args(
+        ["--data_root", "/data", "--sample_root", "/samples", "--real_only"]
+    )
+
+    assert args.real_only is True

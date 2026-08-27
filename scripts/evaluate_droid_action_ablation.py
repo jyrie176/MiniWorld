@@ -16,6 +16,26 @@ def _mae(left: torch.Tensor, right: torch.Tensor) -> float:
     return float((left.float() - right.float()).abs().mean())
 
 
+def compute_real_episode_metrics(ground_truth, real):
+    """Compute RGB metrics when only real-action generations are available."""
+    if ground_truth.ndim != 4 or real.ndim != 4:
+        raise ValueError("videos must have shape (T, H, W, C)")
+    if real.shape != ground_truth.shape:
+        raise ValueError("ground-truth and generated videos must have identical shapes")
+    if ground_truth.shape[0] < 2:
+        raise ValueError("videos must contain one observed and at least one future frame")
+
+    gt_future = ground_truth[1:]
+    real_future = real[1:]
+    persistence = ground_truth[:1].expand_as(gt_future)
+    return {
+        "mae_real": _mae(real_future, gt_future),
+        "final_mae_real": _mae(real_future[-1], gt_future[-1]),
+        "mae_persistence": _mae(persistence, gt_future),
+        "gt_final_motion_mae_from_frame0": _mae(ground_truth[0], ground_truth[-1]),
+    }
+
+
 def compute_episode_metrics(ground_truth, real, zero, reverse):
     """Compute comparable RGB metrics for one episode."""
     videos = (ground_truth, real, zero, reverse)
@@ -85,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--seed_base", type=int, default=20260827)
     parser.add_argument(
+        "--real_only",
+        action="store_true",
+        help="Evaluate real-action generations without requiring zero/reverse outputs.",
+    )
+    parser.add_argument(
         "--checkpoint_label",
         default="official MiniWorld 0.55B DROID bare state dict",
     )
@@ -117,17 +142,24 @@ def main() -> None:
     for index, episode in enumerate(dataset.samples):
         ground_truth = ((dataset[index]["videos"] + 1.0) * 127.5).round().clamp(0, 255).to(torch.uint8)
         real = _read_video(sample_root / "real" / "pred" / f"sample_{index:04d}.mp4")
-        zero = _read_video(sample_root / "zero" / "pred" / f"sample_{index:04d}.mp4")
-        reverse = _read_video(sample_root / "shuffle" / "pred" / f"sample_{index:04d}.mp4")
-        metrics = compute_episode_metrics(ground_truth, real, zero, reverse)
+        if args.real_only:
+            metrics = compute_real_episode_metrics(ground_truth, real)
+        else:
+            zero = _read_video(sample_root / "zero" / "pred" / f"sample_{index:04d}.mp4")
+            reverse = _read_video(sample_root / "shuffle" / "pred" / f"sample_{index:04d}.mp4")
+            metrics = compute_episode_metrics(ground_truth, real, zero, reverse)
         metrics.update(
             episode=episode,
-            real_better_zero=metrics["mae_real"] < metrics["mae_zero"],
-            real_better_reverse=metrics["mae_real"] < metrics["mae_reverse"],
         )
-        metrics["real_best"] = metrics["real_better_zero"] and metrics["real_better_reverse"]
+        if not args.real_only:
+            metrics.update(
+                real_better_zero=metrics["mae_real"] < metrics["mae_zero"],
+                real_better_reverse=metrics["mae_real"] < metrics["mae_reverse"],
+            )
+            metrics["real_best"] = metrics["real_better_zero"] and metrics["real_better_reverse"]
         rows.append(metrics)
-        episode_videos[episode] = [ground_truth, real, zero, reverse]
+        if not args.real_only:
+            episode_videos[episode] = [ground_truth, real, zero, reverse]
 
     columns = ["episode"] + [key for key in rows[0] if key != "episode"]
     with (output_dir / "metrics_per_episode.csv").open("w", newline="") as handle:
@@ -146,21 +178,23 @@ def main() -> None:
         "zero_note": "zero-valued normalized action, not learned null/unconditional",
         "reverse_note": "CLI variant shuffle deterministically reverses time",
     }
-    for variant in ("real", "zero", "reverse"):
+    variants = ("real",) if args.real_only else ("real", "zero", "reverse")
+    for variant in variants:
         summary[f"mae_{variant}"] = _summary([row[f"mae_{variant}"] for row in rows])
-    summary["wins"] = {
-        "real_better_zero": sum(row["real_better_zero"] for row in rows),
-        "real_better_reverse": sum(row["real_better_reverse"] for row in rows),
-        "real_best_both": sum(row["real_best"] for row in rows),
-    }
-    summary["mean_output_difference"] = {
-        "real_vs_zero": float(np.mean([row["output_mae_real_zero"] for row in rows])),
-        "real_vs_reverse": float(np.mean([row["output_mae_real_reverse"] for row in rows])),
-    }
-    summary["mean_delta_vs_real"] = {
-        "zero_minus_real": float(np.mean([row["mae_zero"] - row["mae_real"] for row in rows])),
-        "reverse_minus_real": float(np.mean([row["mae_reverse"] - row["mae_real"] for row in rows])),
-    }
+    if not args.real_only:
+        summary["wins"] = {
+            "real_better_zero": sum(row["real_better_zero"] for row in rows),
+            "real_better_reverse": sum(row["real_better_reverse"] for row in rows),
+            "real_best_both": sum(row["real_best"] for row in rows),
+        }
+        summary["mean_output_difference"] = {
+            "real_vs_zero": float(np.mean([row["output_mae_real_zero"] for row in rows])),
+            "real_vs_reverse": float(np.mean([row["output_mae_real_reverse"] for row in rows])),
+        }
+        summary["mean_delta_vs_real"] = {
+            "zero_minus_real": float(np.mean([row["mae_zero"] - row["mae_real"] for row in rows])),
+            "reverse_minus_real": float(np.mean([row["mae_reverse"] - row["mae_real"] for row in rows])),
+        }
     persistence = [row["mae_persistence"] for row in rows]
     summary["persistence"] = {
         "mean": float(np.mean(persistence)),
@@ -174,14 +208,15 @@ def main() -> None:
     }
     (output_dir / "metrics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
-    ranked = sorted(rows, key=lambda row: row["mae_real"] - min(row["mae_zero"], row["mae_reverse"]))
-    for label, row in (("best-real", ranked[0]), ("worst-real", ranked[-1])):
-        episode = int(row["episode"])
-        _write_comparison(
-            output_dir / f"comparison_{label}_episode_{episode}.png",
-            episode_videos[episode],
-            ["ground truth", "real", "zero", "reverse"],
-        )
+    if not args.real_only:
+        ranked = sorted(rows, key=lambda row: row["mae_real"] - min(row["mae_zero"], row["mae_reverse"]))
+        for label, row in (("best-real", ranked[0]), ("worst-real", ranked[-1])):
+            episode = int(row["episode"])
+            _write_comparison(
+                output_dir / f"comparison_{label}_episode_{episode}.png",
+                episode_videos[episode],
+                ["ground truth", "real", "zero", "reverse"],
+            )
     print(json.dumps(summary, indent=2))
 
 
