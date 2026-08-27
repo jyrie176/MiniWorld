@@ -959,6 +959,48 @@ test 继续密封，留给最终冻结方法的一次性报告。
 
 独立报告：`docs/results/v100-official-055b-expanded1064-lr2e6-continued-1k.md`。
 
+### 阶段 S：Uncertainty Correlation 软件闭环与 GPU Gate
+
+#### 问题与动机
+
+Phase 4 已冻结官方 0.55B，本阶段进入核心创新 Phase 5。正式做 adaptive rollout 前，先验证能否对同一
+观测和真实动作执行多 seed 推理，保存逐步 latent，并把 sampling disagreement 与未来 RGB error
+严格对齐。这里只做 episode 1064、`K=2` 的集成 gate，不允许据此形成相关性结论；test 1080-1095
+保持密封。
+
+#### 实现与验证
+
+- 新增纯 CPU uncertainty 指标：latent population variance、RGB pairwise disagreement、成员级 RGB MAE；
+- 新增 Pearson、带平均 tie rank 的 Spearman、horizon-conditioned Spearman 和等量分桶；
+- sampling 增加 opt-in latent/manifest 导出，记录 checkpoint/data SHA、episode、seed、参数和 Git commit；
+- 新增离线 ensemble evaluator，显式拒绝 sealed test、identity/shape/seed 不一致和非有限数据；
+- 新增四 seed formal launcher，固定官方基线的 FP16、SDPA、real action、6 latent frames、20 sampling steps；
+- 完整非 CUDA/非 FlashAttention 回归：`108 passed, 3 deselected`。
+
+软件提交：`d466e53`。GPU gate 使用 GPU 0/1、seeds `20260827/20260828`，两次采样均退出 0；每份
+latent 为 `(1,48,6,15,20)`、float32、全部 finite，每份 MP4 均为 21 帧，官方 checkpoint SHA 为
+`e4b118befe88cee7338400c5510fdd497212b9b1988034290030b3ed351ced32`。float32 是 sampler 最终 latent
+buffer 的实际输出 dtype；DiT 计算路径仍为 FP16 autocast，manifest 如实记录而不强行转换。
+
+```text
+/data/miniworld/experiments/official-055b-uncertainty-gate-k2-v2
+episodes: [1064]
+K / rows: 2 / 5
+manifest git commit: d466e53
+incomplete: true
+```
+
+初次 gate 的数值产物本身有效，但只读 linked-worktree Docker 无法解析外部 `.git`，manifest 将 commit
+写成 `unknown`。因此该目录未被接受为正式 gate；新增显式 `MINIWORLD_GIT_COMMIT` 注入、unknown
+拒绝测试和 evaluator 检查后，在 `-v2` 新目录完整重跑，而不是手改旧 manifest。
+
+#### 结果解释与下一步
+
+`K=2` 单 episode 的 latent/RGB pooled Spearman 都是 `0.7`，但每个 horizon 只有一个观测，
+horizon-conditioned correlation 未定义，因此预注册 gate 必然不通过。这是符合预期的集成结果，不能
+被解释为方法有效或无效。软件、数据对齐、GPU、产物身份和 incomplete 保护均已闭环，下一步运行固定
+的 validation 1064-1079、`K=4` 正式相关性实验，仍不访问 test。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
