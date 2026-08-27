@@ -1001,6 +1001,50 @@ horizon-conditioned correlation 未定义，因此预注册 gate 必然不通过
 被解释为方法有效或无效。软件、数据对齐、GPU、产物身份和 incomplete 保护均已闭环，下一步运行固定
 的 validation 1064-1079、`K=4` 正式相关性实验，仍不访问 test。
 
+### 阶段 T：正式 Uncertainty–Error Correlation
+
+#### 问题、配置与完整性
+
+回答 sampling disagreement 是否能预测未来 RGB error，以及该关系是否只是二者都随 horizon 上升造成。
+使用冻结官方 0.55B、validation 1064-1079、real action、20 sampling steps、FP16/SDPA，对每条 episode
+用 seeds `20260827-20260830` 生成 `K=4` 条预测。test 1080-1095 未访问。
+
+```text
+checkpoint SHA: e4b118befe88cee7338400c5510fdd497212b9b1988034290030b3ed351ced32
+validation manifest SHA: ac3e1dbff5a22732b54c47834751714f31302bf0aca859b4dc78a2809203ae70
+sampling Git commit: f5ccd34a4108523d1bbd72e325cf79ebf307742e
+output: /data/miniworld/experiments/official-055b-uncertainty-correlation-k4
+```
+
+四个 seed 均退出 0，各有 16 latent + 16 MP4；64/64 latent 为 finite、形状 `(1,48,6,15,20)`，
+manifest identity 完全一致。正式 evaluator 输出 16 episodes × 5 future steps = 80 行，
+`incomplete=false`；从 CSV 独立重算与 JSON 三个相关系数逐值完全一致。
+
+#### 结果与预注册 Gate
+
+| estimator | Pearson | pooled Spearman | horizon-conditioned Spearman | gate |
+| --- | ---: | ---: | ---: | --- |
+| latent variance（主） | 0.7692 | 0.7171 | 0.5818 | **pass** |
+| RGB disagreement（对照） | 0.9335 | 0.9335 | 0.9041 | **pass** |
+
+latent 四个等量 uncertainty bins 的 mean error 为 `3.8699→4.3641→5.5107→8.1770`；RGB bins 为
+`3.1822→4.4973→5.9369→8.3052`，均单调上升。latent 在五个固定 horizon 内的 Spearman 也全部
+为正：`0.4500/0.4912/0.5794/0.7441/0.6441`。因此结果不是仅由未来步数制造的 pooled 伪相关，
+通过预注册的 `0.30 / 0.20 / top>bottom` 三项 gate。
+
+#### 反例、边界与判断
+
+信号不是完美置信度。episode 1078 的逐 horizon latent Spearman 为 `-0.30`，其 steps 4-5 出现
+低 latent uncertainty / 高 error；episode 1070 step 4 也被明显低估。RGB disagreement 虽更强，但
+它与 error 共用 decoded RGB 域并同时受运动幅度影响，不能把高相关解释为因果或已校准概率。
+
+结论限定为：**sampling disagreement 在当前官方 0.55B validation 上包含可用于 error ranking 的信号，
+允许进入 adaptive rollout 设计；尚未证明 adaptive rollout 有效。** 下一项必须公平比较 fixed、threshold、
+smoothed/hysteresis 的质量-覆盖率-成本曲线，不能靠少预测制造低误差。阈值继续只在 validation 选择，
+完整方法冻结前不查看 test。
+
+独立报告：`docs/results/v100-official-055b-uncertainty-correlation.md`。
+
 ## 4. 当前关键结论
 
 1. **V100 路径可用：** SDPA + FP16 GradScaler 能完成 5k-step 训练与推理。
@@ -1016,6 +1060,7 @@ horizon-conditioned correlation 未定义，因此预注册 gate 必然不通过
 11. **0.55B 1k 全参数续训无收益：** model MAE 明显恶化，EMA 近似原点但没有改善，不能直接扩到 5k。
 12. **扩到 1064 episodes 只解决部分问题：** 动作胜率恢复官方水平，但 model/EMA 质量仍差于官方；下一变量应是 LR。
 13. **Phase 4 已冻结官方 0.55B：** LR `2e-6` 消除大部分遗忘但没有实际收益，停止 continued-training 搜索。
+14. **Phase 5 核心信号成立：** latent/RGB disagreement 均通过预注册 correlation gate，下一步设计 adaptive rollout。
 
 ## 5. 当前产物索引
 
@@ -1039,14 +1084,16 @@ horizon-conditioned correlation 未定义，因此预注册 gate 必然不通过
 | Expanded 1k validation | `/data/miniworld/experiments/official-055b-expanded1064-continued-1k-validation` |
 | Lower-LR 1k checkpoints | `/data/miniworld/outputs/droid-official-055b-expanded1064-lr2e6-1k-lf6-ddp2` |
 | Lower-LR 1k validation | `/data/miniworld/experiments/official-055b-expanded1064-lr2e6-1k-validation` |
+| Uncertainty GPU gate | `/data/miniworld/experiments/official-055b-uncertainty-gate-k2-v2` |
+| Formal uncertainty correlation | `/data/miniworld/experiments/official-055b-uncertainty-correlation-k4` |
 | 0.12B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/wdslnxhb` |
 | Lower-LR 0.55B W&B | `https://wandb.ai/irvingjyrie176-tencent/miniworld-v100/runs/d59p17p7` |
 | GitHub PR | `https://github.com/jyrie176/MiniWorld/pull/1` |
 
 ## 6. 下一步实验队列
 
-当前主线位置：**Phase 4 已冻结官方 0.55B zero-shot baseline；下一阶段进入 uncertainty-error
-correlation**。不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
+当前主线位置：**Phase 5 的 uncertainty-error correlation 已通过；下一项设计并验证 uncertainty-aware
+adaptive rollout**。不继续增加 0.12B 或 continued-training 步数，不查看密封 test。
 
 ### P0：Phase 4 冻结结果
 
@@ -1057,8 +1104,8 @@ continued-training 选择已结束，官方 zero-shot 胜出，作为后续创�
 - expanded data 的 `LR=2e-6` 保守适配对照；
 - persistence、RGB MAE、训练成本、采样吞吐和显存。
 
-下一项先建立 uncertainty 与未来预测误差的相关性，确认信号有效后才实现 adaptive rollout。
-test split 继续保留到完整创新方法冻结后使用一次。
+uncertainty 与未来预测误差的相关性已建立。下一项比较 fixed、threshold、smoothed/hysteresis，并输出
+质量-覆盖率-成本曲线。test split 继续保留到完整创新方法冻结后使用一次。
 
 ### P2：进入项目创新主线
 
