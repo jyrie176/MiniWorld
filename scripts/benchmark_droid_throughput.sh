@@ -13,6 +13,8 @@ CKPT="${CKPT:?Set CKPT to a MiniWorld checkpoint}"
 VAE_CKPT="${VAE_CKPT:?Set VAE_CKPT to Wan2.2_VAE.pth}"
 SAMPLE_DIR="${SAMPLE_DIR:-${REPO_DIR}/throughput/droid_${MODEL}}"
 GPU="${GPU:-0}"
+PRECISION="${PRECISION:-auto}"
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
 
 CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --dataset droid \
@@ -21,6 +23,8 @@ CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --vae_checkpoint "${VAE_CKPT}" \
   --sample_dir "${SAMPLE_DIR}" \
   --wm_model "${MODEL}" \
+  --precision "${PRECISION}" \
+  --attention_backend "${ATTENTION_BACKEND}" \
   --total_len "${TOTAL_LEN:-96}" \
   --df_chunk_size 2 \
   --df_ardiff_step "${DF_ARDIFF_STEP:-5}" \
@@ -32,4 +36,3 @@ CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --sample_num_videos "${SAMPLE_NUM_VIDEOS:-20}" \
   --benchmark_stream_timing \
   --benchmark_no_save
-

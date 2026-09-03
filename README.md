@@ -65,10 +65,12 @@ Key components:
 - Linux with an NVIDIA CUDA GPU
 - Python 3.11
 - CUDA-compatible PyTorch 2.x
-- FlashAttention
+- PyTorch SDPA, or optional FlashAttention on supported GPUs
 - 8 GPUs are recommended for reproducing the default training recipe; inference uses one GPU
 
-MiniWorld relies on CUDA, NCCL, bf16, and FlashAttention. CPU-only and macOS execution are not currently supported.
+MiniWorld relies on CUDA and NCCL. Its upstream optimized recipe uses BF16 and
+FlashAttention, while the V100 path below uses FP16 and PyTorch SDPA. CPU-only
+and macOS execution are not currently supported.
 
 ### Create the environment
 
@@ -82,18 +84,42 @@ conda activate miniworld
 # CUDA 12.4 is shown as an example.
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# FlashAttention needs access to the already-installed PyTorch package.
 pip install -r requirements.txt --no-build-isolation
+
+# Optional on supported SM80+ GPUs only.
+pip install flash-attn --no-build-isolation
 ```
 
 Verify the installation:
 
 ```bash
-python -c "import torch, flash_attn; print('PyTorch:', torch.__version__, '| CUDA:', torch.version.cuda)"
+python -c "import torch; print('PyTorch:', torch.__version__, '| CUDA:', torch.version.cuda)"
 ```
 
 > [!IMPORTANT]
 > This repository is intentionally lightweight and does not currently provide a `setup.py` or `pyproject.toml`. Run the commands from the repository root, or prepend `PYTHONPATH=.` when invoking Python modules elsewhere.
+
+### Tesla V100 compatibility
+
+Tesla V100 (SM70) does not use the mainline FlashAttention-2 CUDA backend and
+does not have the BF16 Tensor Core path assumed by the default training recipe.
+Use PyTorch SDPA, FP16 dynamic loss scaling, and AdamW for the validated V100
+compatibility path:
+
+```bash
+NPROC_PER_NODE=1 \
+MIXED_PRECISION=fp16 \
+ATTENTION_BACKEND=auto \
+USE_MUON=0 \
+MAX_GRAD_NORM=1.0 \
+bash scripts/train_droid.sh
+```
+
+On SM70, `ATTENTION_BACKEND=auto` resolves to `sdpa`. Sampling
+`PRECISION=auto` resolves to FP16. Explicitly requesting unavailable
+FlashAttention produces an error instead of silently changing the backend.
+The no-asset compatibility tests can be run without a VAE, dataset, or model
+checkpoint; end-to-end training still requires those assets.
 
 ## Data and Checkpoints
 
@@ -463,4 +489,3 @@ If you find MiniWorld useful in your research, please cite:
   year    = {2026}
 }
 ```
-

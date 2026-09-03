@@ -14,6 +14,8 @@ CKPT="${CKPT:?Set CKPT to a MiniWorld checkpoint}"
 VAE_CKPT="${VAE_CKPT:?Set VAE_CKPT to Wan2.2_VAE.pth}"
 SAMPLE_DIR="${SAMPLE_DIR:-${REPO_DIR}/samples/re10k_${MODEL}}"
 GPU="${GPU:-0}"
+PRECISION="${PRECISION:-auto}"
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
 
 CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --dataset re10k \
@@ -23,6 +25,8 @@ CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --vae_checkpoint "${VAE_CKPT}" \
   --sample_dir "${SAMPLE_DIR}" \
   --wm_model "${MODEL}" \
+  --precision "${PRECISION}" \
+  --attention_backend "${ATTENTION_BACKEND}" \
   --total_len "${TOTAL_LEN:-64}" \
   --df_chunk_size 2 \
   --df_ardiff_step "${DF_ARDIFF_STEP:-5}" \
@@ -32,4 +36,3 @@ CUDA_VISIBLE_DEVICES="${GPU}" python -m miniworld.sample \
   --cfg_scale "${CFG_SCALE:-2.0}" \
   --num_sampling_steps "${NUM_SAMPLING_STEPS:-100}" \
   --sample_num_videos "${SAMPLE_NUM_VIDEOS:-50}"
-

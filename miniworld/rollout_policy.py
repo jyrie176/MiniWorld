@@ -1,0 +1,629 @@
+"""Pure policy and accounting primitives for uncertainty-aware rollout."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+import math
+from collections import defaultdict
+from typing import Mapping, Sequence
+
+import numpy as np
+
+
+class Decision(str, Enum):
+    CONTINUE = "continue"
+    REQUEST_OBSERVATION = "request_observation"
+    TERMINATE = "terminate"
+
+
+@dataclass(frozen=True)
+class PolicyTrace:
+    decisions: tuple[Decision, ...]
+    retained_horizon: int
+    generated_horizon: int
+    requested_observation_at: int | None
+
+
+@dataclass(frozen=True)
+class ChunkLayout:
+    history_len: int
+    future_horizon: int
+    chunk_size: int
+    completion_boundaries: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class EpisodePolicyResult:
+    episode: int
+    trace: PolicyTrace
+    retained_error_numerator: float
+    retained_count: int
+    discarded_error_numerator: float
+    discarded_count: int
+    per_seed_retained_error: tuple[float, ...]
+    retained_step_errors: tuple[float, ...]
+
+
+def _validate_horizons(h_min: int, h_max: int, available: int) -> None:
+    if not 1 <= h_min <= h_max <= available:
+        raise ValueError("horizons must satisfy 1 <= h_min <= h_max <= available")
+
+
+def build_chunk_layout(
+    *, history_len: int, future_horizon: int, chunk_size: int
+) -> ChunkLayout:
+    if min(history_len, future_horizon, chunk_size) <= 0:
+        raise ValueError(
+            "history_len, future_horizon, and chunk_size must be positive"
+        )
+    total_frames = history_len + future_horizon
+    global_ends = list(range(chunk_size, total_frames, chunk_size)) + [
+        total_frames
+    ]
+    boundaries = tuple(
+        dict.fromkeys(
+            min(future_horizon, end - history_len)
+            for end in global_ends
+            if end > history_len
+        )
+    )
+    if not boundaries or boundaries[-1] != future_horizon:
+        raise ValueError("chunk layout does not cover the future horizon")
+    return ChunkLayout(
+        history_len=history_len,
+        future_horizon=future_horizon,
+        chunk_size=chunk_size,
+        completion_boundaries=boundaries,
+    )
+
+
+def _validate_uncertainty(
+    uncertainty: Sequence[float], tau: float, h_min: int, h_max: int
+) -> tuple[float, ...]:
+    values = tuple(float(value) for value in uncertainty)
+    if len(values) != 5:
+        raise ValueError("uncertainty must contain exactly five future steps")
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("uncertainty values must be finite")
+    if not math.isfinite(tau):
+        raise ValueError("threshold must be finite")
+    _validate_horizons(h_min, h_max, len(values))
+    return values
+
+
+def fixed_policy(
+    horizon: int, *, h_min: int = 1, h_max: int = 5
+) -> PolicyTrace:
+    _validate_horizons(h_min, h_max, 5)
+    if not h_min <= horizon <= h_max:
+        raise ValueError("fixed horizon must lie between h_min and h_max")
+    decisions = (Decision.CONTINUE,) * (horizon - 1) + (Decision.TERMINATE,)
+    return PolicyTrace(decisions, horizon, horizon, None)
+
+
+def _trace_from_trigger(trigger_step: int | None, h_max: int) -> PolicyTrace:
+    if trigger_step is None:
+        decisions = (Decision.CONTINUE,) * (h_max - 1) + (Decision.TERMINATE,)
+        return PolicyTrace(decisions, h_max, h_max, None)
+    decisions = (Decision.CONTINUE,) * (trigger_step - 1) + (
+        Decision.REQUEST_OBSERVATION,
+    )
+    return PolicyTrace(
+        decisions,
+        max(1, trigger_step - 1),
+        trigger_step,
+        trigger_step,
+    )
+
+
+def threshold_policy(
+    uncertainty: Sequence[float],
+    tau: float,
+    *,
+    h_min: int = 1,
+    h_max: int = 5,
+) -> PolicyTrace:
+    values = _validate_uncertainty(uncertainty, tau, h_min, h_max)
+    trigger = next(
+        (
+            step
+            for step, value in enumerate(values[:h_max], start=1)
+            if step >= h_min and value > tau
+        ),
+        None,
+    )
+    return _trace_from_trigger(trigger, h_max)
+
+
+def smoothed_hysteretic_policy(
+    uncertainty: Sequence[float],
+    tau: float,
+    *,
+    alpha: float = 0.5,
+    consecutive: int = 2,
+    h_min: int = 1,
+    h_max: int = 5,
+) -> PolicyTrace:
+    values = _validate_uncertainty(uncertainty, tau, h_min, h_max)
+    if not math.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+        raise ValueError("alpha must lie in (0, 1]")
+    if consecutive < 1:
+        raise ValueError("consecutive must be positive")
+
+    ema = values[0]
+    run_length = 0
+    trigger = None
+    for step, value in enumerate(values[:h_max], start=1):
+        if step > 1:
+            ema = alpha * value + (1.0 - alpha) * ema
+        run_length = run_length + 1 if step >= h_min and ema > tau else 0
+        if run_length >= consecutive:
+            trigger = step
+            break
+    return _trace_from_trigger(trigger, h_max)
+
+
+def _validate_chunk_policy_inputs(
+    uncertainty: Sequence[float], tau: float, layout: ChunkLayout
+) -> tuple[float, ...]:
+    values = tuple(float(value) for value in uncertainty)
+    if len(values) != layout.future_horizon:
+        raise ValueError("uncertainty length must equal layout future_horizon")
+    if not values or not all(math.isfinite(value) for value in values):
+        raise ValueError("uncertainty values must be finite")
+    if not math.isfinite(tau):
+        raise ValueError("threshold must be finite")
+    if (
+        not layout.completion_boundaries
+        or layout.completion_boundaries[-1] != layout.future_horizon
+        or tuple(sorted(set(layout.completion_boundaries)))
+        != layout.completion_boundaries
+    ):
+        raise ValueError("layout completion boundaries are invalid")
+    return values
+
+
+def _chunk_trace(
+    layout: ChunkLayout,
+    trigger_steps: Sequence[bool],
+) -> PolicyTrace:
+    previous_boundary = 1
+    start = 1
+    for boundary in layout.completion_boundaries:
+        first_trigger = next(
+            (
+                step
+                for step in range(start, boundary + 1)
+                if trigger_steps[step - 1]
+            ),
+            None,
+        )
+        if first_trigger is not None:
+            decisions = (Decision.CONTINUE,) * (boundary - 1) + (
+                Decision.REQUEST_OBSERVATION,
+            )
+            return PolicyTrace(
+                decisions=decisions,
+                retained_horizon=max(1, previous_boundary),
+                generated_horizon=boundary,
+                requested_observation_at=first_trigger,
+            )
+        previous_boundary = boundary
+        start = boundary + 1
+    horizon = layout.future_horizon
+    return PolicyTrace(
+        decisions=(Decision.CONTINUE,) * (horizon - 1) + (Decision.TERMINATE,),
+        retained_horizon=horizon,
+        generated_horizon=horizon,
+        requested_observation_at=None,
+    )
+
+
+def chunk_aligned_threshold_policy(
+    uncertainty: Sequence[float],
+    tau: float,
+    *,
+    layout: ChunkLayout,
+) -> PolicyTrace:
+    values = _validate_chunk_policy_inputs(uncertainty, tau, layout)
+    return _chunk_trace(layout, [value > tau for value in values])
+
+
+def chunk_aligned_smoothed_hysteretic_policy(
+    uncertainty: Sequence[float],
+    tau: float,
+    *,
+    layout: ChunkLayout,
+    alpha: float = 0.5,
+    consecutive: int = 2,
+) -> PolicyTrace:
+    values = _validate_chunk_policy_inputs(uncertainty, tau, layout)
+    if not math.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+        raise ValueError("alpha must lie in (0, 1]")
+    if consecutive < 1:
+        raise ValueError("consecutive must be positive")
+    ema = values[0]
+    run_length = 0
+    trigger_steps = []
+    for step, value in enumerate(values, start=1):
+        if step > 1:
+            ema = alpha * value + (1.0 - alpha) * ema
+        run_length = run_length + 1 if ema > tau else 0
+        trigger_steps.append(run_length >= consecutive)
+    return _chunk_trace(layout, trigger_steps)
+
+
+def score_policy_trace(
+    episode: int,
+    trace: PolicyTrace,
+    step_errors: Sequence[float],
+    per_seed_step_errors: np.ndarray,
+) -> EpisodePolicyResult:
+    errors = np.asarray(step_errors, dtype=np.float64)
+    seed_errors = np.asarray(per_seed_step_errors, dtype=np.float64)
+    if errors.shape != (5,) or seed_errors.ndim != 2 or seed_errors.shape[1] != 5:
+        raise ValueError("errors must contain five ordered future steps")
+    if seed_errors.shape[0] < 1:
+        raise ValueError("at least one seed error row is required")
+    if not np.isfinite(errors).all() or not np.isfinite(seed_errors).all():
+        raise ValueError("errors must be finite")
+    retained = trace.retained_horizon
+    if not 1 <= retained <= 5:
+        raise ValueError("trace retained horizon must lie in [1, 5]")
+    retained_errors = errors[:retained]
+    discarded_errors = errors[retained:]
+    return EpisodePolicyResult(
+        episode=int(episode),
+        trace=trace,
+        retained_error_numerator=float(retained_errors.sum()),
+        retained_count=retained,
+        discarded_error_numerator=float(discarded_errors.sum()),
+        discarded_count=5 - retained,
+        per_seed_retained_error=tuple(
+            float(value) for value in seed_errors[:, :retained].mean(axis=1)
+        ),
+        retained_step_errors=tuple(float(value) for value in retained_errors),
+    )
+
+
+def aggregate_policy_results(
+    results: Sequence[EpisodePolicyResult], *, high_error_cutoff: float
+) -> dict[str, float | int]:
+    if not results:
+        raise ValueError("at least one episode result is required")
+    if not math.isfinite(high_error_cutoff):
+        raise ValueError("high_error_cutoff must be finite")
+    retained_count = sum(result.retained_count for result in results)
+    generated_count = sum(result.trace.generated_horizon for result in results)
+    retained_numerator = sum(
+        result.retained_error_numerator for result in results
+    )
+    retained_values = [
+        value for result in results for value in result.retained_step_errors
+    ]
+    episode_errors = [
+        result.retained_error_numerator / result.retained_count for result in results
+    ]
+    total_steps = len(results) * 5
+    return {
+        "episode_count": len(results),
+        "retained_count": retained_count,
+        "generated_count": generated_count,
+        "retained_error_numerator": retained_numerator,
+        "retained_rgb_mae": retained_numerator / retained_count,
+        "coverage": retained_count / total_steps,
+        "generated_coverage": generated_count / total_steps,
+        "mean_retained_horizon": retained_count / len(results),
+        "mean_generated_horizon": generated_count / len(results),
+        "median_episode_error": float(np.median(episode_errors)),
+        "p90_episode_error": float(np.percentile(episode_errors, 90)),
+        "worst_episode_error": float(max(episode_errors)),
+        "request_rate": sum(
+            result.trace.requested_observation_at is not None for result in results
+        )
+        / len(results),
+        "avoided_completed_future_steps": total_steps - generated_count,
+        "high_error_retained_fraction": sum(
+            value >= high_error_cutoff for value in retained_values
+        )
+        / retained_count,
+    }
+
+
+def matched_fixed_baseline(
+    rows: Sequence[Mapping[str, float]], mean_horizon: float
+) -> dict[str, object]:
+    if not math.isfinite(mean_horizon) or not 1.0 <= mean_horizon <= 5.0:
+        raise ValueError("mean_horizon must lie in [1, 5]")
+    by_episode: dict[int, dict[int, float]] = defaultdict(dict)
+    for row in rows:
+        episode = int(row["episode"])
+        step = int(row["future_latent_step"])
+        error = float(row["error_rgb"])
+        if step in by_episode[episode]:
+            raise ValueError("duplicate episode-step row")
+        if not math.isfinite(error):
+            raise ValueError("error_rgb must be finite")
+        by_episode[episode][step] = error
+    if not by_episode or any(set(values) != set(range(1, 6)) for values in by_episode.values()):
+        raise ValueError("each episode must contain exactly five future steps")
+
+    lower = int(math.floor(mean_horizon))
+    upper = int(math.ceil(mean_horizon))
+    upper_weight = mean_horizon - lower
+    episode_numerators = {}
+    episode_errors = {}
+    for episode, step_map in sorted(by_episode.items()):
+        lower_numerator = sum(step_map[step] for step in range(1, lower + 1))
+        upper_numerator = sum(step_map[step] for step in range(1, upper + 1))
+        expected_numerator = (
+            (1.0 - upper_weight) * lower_numerator
+            + upper_weight * upper_numerator
+        )
+        episode_numerators[episode] = expected_numerator
+        episode_errors[episode] = expected_numerator / mean_horizon
+    mean_numerator = sum(episode_numerators.values()) / len(episode_numerators)
+    return {
+        "mean_horizon": mean_horizon,
+        "coverage": mean_horizon / 5.0,
+        "retained_rgb_mae": mean_numerator / mean_horizon,
+        "p90_episode_error": float(np.percentile(list(episode_errors.values()), 90)),
+        "episode_errors": episode_errors,
+    }
+
+
+def threshold_candidates(
+    training_uncertainty: Sequence[float], *, max_candidates: int = 103
+) -> np.ndarray:
+    values = np.asarray(training_uncertainty, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("training uncertainty must be a non-empty finite sequence")
+    if max_candidates < 3:
+        raise ValueError("max_candidates must be at least three")
+    unique = np.unique(values)
+    interior_limit = max_candidates - 2
+    if unique.size <= interior_limit:
+        interior = unique
+    else:
+        interior = np.unique(
+            np.quantile(values, np.linspace(0.0, 1.0, interior_limit))
+        )
+    return np.concatenate(
+        (
+            [np.nextafter(unique[0], -np.inf)],
+            interior,
+            [np.nextafter(unique[-1], np.inf)],
+        )
+    )
+
+
+def choose_operating_point(
+    candidates: Sequence[Mapping[str, object]], *, target_coverage: float = 0.80
+) -> dict[str, object]:
+    if not 0.0 < target_coverage <= 1.0:
+        raise ValueError("target_coverage must lie in (0, 1]")
+    feasible = [
+        dict(candidate)
+        for candidate in candidates
+        if float(candidate["coverage"]) >= target_coverage
+    ]
+    if not feasible:
+        raise ValueError("no threshold candidate reaches target coverage")
+    return min(
+        feasible,
+        key=lambda item: (
+            float(item["retained_rgb_mae"]),
+            -float(item["coverage"]),
+            -float(item["tau"]),
+        ),
+    )
+
+
+def _validate_policy_rows(rows: Sequence[Mapping[str, object]]) -> dict[int, list[Mapping[str, object]]]:
+    by_episode: dict[int, list[Mapping[str, object]]] = defaultdict(list)
+    seen = set()
+    for row in rows:
+        episode = int(row["episode"])
+        step = int(row["future_latent_step"])
+        if (episode, step) in seen:
+            raise ValueError("duplicate episode-step row")
+        seen.add((episode, step))
+        by_episode[episode].append(row)
+    for episode_rows in by_episode.values():
+        episode_rows.sort(key=lambda row: int(row["future_latent_step"]))
+        if [int(row["future_latent_step"]) for row in episode_rows] != list(range(1, 6)):
+            raise ValueError("each episode must contain five ordered future steps")
+    return by_episode
+
+
+def _score_episode_rows(
+    episode: int,
+    rows: Sequence[Mapping[str, object]],
+    policy: str,
+    tau: float,
+    *,
+    execution: str = "frame",
+    layout: ChunkLayout | None = None,
+) -> EpisodePolicyResult:
+    uncertainty = [float(row["uncertainty_latent"]) for row in rows]
+    if execution == "frame" and layout is not None:
+        raise ValueError("layout is only valid for chunk execution")
+    if execution == "chunk" and layout is None:
+        raise ValueError("chunk execution requires a layout")
+    if execution not in ("frame", "chunk"):
+        raise ValueError(f"unknown execution mode: {execution}")
+    if execution == "frame" and policy == "threshold":
+        trace = threshold_policy(uncertainty, tau)
+    elif execution == "frame" and policy == "smoothed_hysteretic":
+        trace = smoothed_hysteretic_policy(uncertainty, tau)
+    elif execution == "chunk" and policy == "threshold":
+        assert layout is not None
+        trace = chunk_aligned_threshold_policy(uncertainty, tau, layout=layout)
+    elif execution == "chunk" and policy == "smoothed_hysteretic":
+        assert layout is not None
+        trace = chunk_aligned_smoothed_hysteretic_policy(
+            uncertainty, tau, layout=layout
+        )
+    else:
+        raise ValueError(f"unknown policy: {policy}")
+    step_errors = [float(row["error_rgb"]) for row in rows]
+    seed_errors = np.asarray(
+        [
+            [float(row[f"error_seed_{seed}"]) for row in rows]
+            for seed in range(4)
+        ],
+        dtype=np.float64,
+    )
+    return score_policy_trace(episode, trace, step_errors, seed_errors)
+
+
+def select_threshold(
+    training_rows: Sequence[Mapping[str, object]],
+    policy: str,
+    *,
+    target_coverage: float = 0.80,
+    execution: str = "frame",
+    layout: ChunkLayout | None = None,
+) -> dict[str, object]:
+    if execution == "frame" and layout is not None:
+        raise ValueError("layout is only valid for chunk execution")
+    if execution == "chunk" and layout is None:
+        raise ValueError("chunk execution requires a layout")
+    if execution not in ("frame", "chunk"):
+        raise ValueError(f"unknown execution mode: {execution}")
+    by_episode = _validate_policy_rows(training_rows)
+    uncertainties = [
+        float(row["uncertainty_latent"])
+        for episode_rows in by_episode.values()
+        for row in episode_rows
+    ]
+    candidates = threshold_candidates(uncertainties)
+    all_errors = [
+        float(row["error_rgb"])
+        for episode_rows in by_episode.values()
+        for row in episode_rows
+    ]
+    high_error_cutoff = float(np.percentile(all_errors, 75))
+    curve = []
+    for tau in candidates:
+        results = [
+            _score_episode_rows(
+                episode,
+                episode_rows,
+                policy,
+                float(tau),
+                execution=execution,
+                layout=layout,
+            )
+            for episode, episode_rows in sorted(by_episode.items())
+        ]
+        metrics = aggregate_policy_results(
+            results, high_error_cutoff=high_error_cutoff
+        )
+        curve.append({"tau": float(tau), **metrics})
+    selected = choose_operating_point(curve, target_coverage=target_coverage)
+    return {
+        **selected,
+        "policy": policy,
+        "execution": execution,
+        "history_len": layout.history_len if layout is not None else None,
+        "chunk_size": layout.chunk_size if layout is not None else None,
+        "completion_boundaries": list(layout.completion_boundaries)
+        if layout is not None
+        else None,
+        "target_coverage": target_coverage,
+        "high_error_cutoff": high_error_cutoff,
+        "threshold_candidates": [float(value) for value in candidates],
+        "candidate_source_episodes": sorted(by_episode),
+        "curve": curve,
+    }
+
+
+def run_loeo(
+    rows: Sequence[Mapping[str, object]],
+    policy: str,
+    *,
+    execution: str = "frame",
+    layout: ChunkLayout | None = None,
+) -> tuple[list[dict[str, object]], list[EpisodePolicyResult]]:
+    by_episode = _validate_policy_rows(rows)
+    expected_episodes = set(range(1064, 1080))
+    if set(by_episode) != expected_episodes:
+        raise ValueError("formal LOEO requires validation episodes 1064-1079")
+    folds = []
+    held_out_results = []
+    for held_out in sorted(by_episode):
+        training_rows = [
+            row
+            for episode, episode_rows in sorted(by_episode.items())
+            if episode != held_out
+            for row in episode_rows
+        ]
+        selected = select_threshold(
+            training_rows, policy, execution=execution, layout=layout
+        )
+        result = _score_episode_rows(
+            held_out,
+            by_episode[held_out],
+            policy,
+            float(selected["tau"]),
+            execution=execution,
+            layout=layout,
+        )
+        folds.append(
+            {
+                "held_out_episode": held_out,
+                "policy": policy,
+                "execution": execution,
+                "history_len": selected["history_len"],
+                "chunk_size": selected["chunk_size"],
+                "completion_boundaries": selected["completion_boundaries"],
+                "tau": selected["tau"],
+                "training_coverage": selected["coverage"],
+                "training_retained_rgb_mae": selected["retained_rgb_mae"],
+                "candidate_source_episodes": selected[
+                    "candidate_source_episodes"
+                ],
+                "threshold_candidates": selected["threshold_candidates"],
+            }
+        )
+        held_out_results.append(result)
+    return folds, held_out_results
+
+
+def evaluate_offline_gate(
+    adaptive: Mapping[str, float],
+    matched_fixed: Mapping[str, float],
+    episode_deltas: Sequence[float],
+) -> dict[str, bool]:
+    deltas = tuple(float(value) for value in episode_deltas)
+    checks = {
+        "coverage_at_least_0_80": float(adaptive["coverage"]) >= 0.80,
+        "retained_error_below_matched_fixed": float(
+            adaptive["retained_rgb_mae"]
+        )
+        < float(matched_fixed["retained_rgb_mae"]),
+        "episode_wins_at_least_9_of_16": len(deltas) == 16
+        and sum(value < 0.0 for value in deltas) >= 9,
+        "p90_not_worse_by_more_than_0_10": float(
+            adaptive["p90_episode_error"]
+        )
+        <= float(matched_fixed["p90_episode_error"]) + 0.10,
+    }
+    return {**checks, "passed": all(checks.values())}
+
+
+def evaluate_chunk_aligned_gate(
+    adaptive: Mapping[str, float],
+    matched_fixed: Mapping[str, float],
+    episode_deltas: Sequence[float],
+) -> dict[str, bool]:
+    quality = evaluate_offline_gate(adaptive, matched_fixed, episode_deltas)
+    completed_cost_passed = float(adaptive["generated_coverage"]) < 1.0
+    return {
+        **{key: value for key, value in quality.items() if key != "passed"},
+        "quality_gate_passed": quality["passed"],
+        "completed_generated_coverage_below_1_00": completed_cost_passed,
+        "passed": quality["passed"] and completed_cost_passed,
+    }

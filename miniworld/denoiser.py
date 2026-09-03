@@ -64,6 +64,7 @@ class DenoiserConfig:
         self.wm_mlp_ratio: float = 4.0
         self.wm_use_qknorm: bool = True
         self.wm_use_checkpoint: bool = True
+        self.attention_backend: str = "flash"
         self.cond_dim: int = 0
         # When True, y is treated as per-token spatial conditioning
         # ``(B, T, cond_dim, H_lat, W_lat)`` (e.g. ray-encoding for camera
@@ -141,6 +142,7 @@ class Denoiser(nn.Module):
             adaln_mode=cfg.adaln_mode,
             cond_dropout_prob=cfg.cond_dropout_prob,
             action_null_first=cfg.action_null_first,
+            attention_backend=cfg.attention_backend,
         )
 
         self.trained_num_frames = (
@@ -493,7 +495,7 @@ class Denoiser(nn.Module):
         if not return_pred:
             return v_loss
 
-        x_pred = z + (1.0 - t_view) * v_pred
+        x_pred = z + t_view * v_pred
         clean_mask_5d = clean_mask.view(b, 1, t, 1, 1)
         x_pred = x_pred * (1.0 - clean_mask_5d) + latents * clean_mask_5d
         return v_loss, x_pred.detach(), t_frame.max(dim=1).values.detach()
